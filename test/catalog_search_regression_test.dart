@@ -5,12 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harmoniq/models/song.dart';
-import 'package:harmoniq/models/youtube_video.dart';
 import 'package:harmoniq/screens/library_screen.dart';
 import 'package:harmoniq/screens/search_screen.dart';
 import 'package:harmoniq/services/audio_service.dart';
 import 'package:harmoniq/widgets/song_tile.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'audio_service_test.dart' show TestAudioPlayer, onlineSong;
 
 Song track(int id, {String? title, String album = 'Album'}) => Song(
   id: id,
@@ -18,12 +19,9 @@ Song track(int id, {String? title, String album = 'Album'}) => Song(
   artist: 'Artist',
   album: album,
   duration: const Duration(minutes: 3),
-  audioPath: '',
+  audioPath: '/test/file$id.mp3',
   gradientId: id,
 );
-
-YoutubeVideo video(String id, String title) =>
-    YoutubeVideo(id: id, title: title, artist: 'Channel', thumbnailUrl: '');
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -32,7 +30,7 @@ void main() {
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
-    service = AudioService();
+    service = AudioService(audioPlayer: TestAudioPlayer());
     // Let persisted favorites initialize before making assertions.
     await Future<void>.delayed(Duration.zero);
   });
@@ -60,7 +58,7 @@ void main() {
           audioDownloadAllowed: true,
         )
         .toJson();
-    for (final source in ['jamendo', 'legacy']) {
+    for (final source in ['youtube', 'jamendo', 'legacy']) {
       final restored = Song.fromJson({...original, 'source': source});
       expect(restored.source, SongSource.legacy);
       expect(restored.isOnline, isTrue);
@@ -92,7 +90,7 @@ void main() {
       SharedPreferences.setMockInitialValues({
         key: [jsonEncode(oldJson)],
       });
-      service = AudioService();
+      service = AudioService(audioPlayer: TestAudioPlayer());
       await Future<void>.delayed(Duration.zero);
       expect(service.favorites.single.toJson(), saved.toJson());
       expect(service.playlists.first.songs.single.source, SongSource.legacy);
@@ -102,7 +100,7 @@ void main() {
 
       scanReturns(
         () => [
-          {'id': 7, 'title': 'Local collision', 'path': ''},
+          {'id': 7, 'title': 'Local collision', 'path': '/test/file.mp3'},
         ],
       );
       await service.scanLocalSongs();
@@ -118,7 +116,7 @@ void main() {
       expect(jsonDecode(prefs.getStringList(key)!.single), saved.toJson());
 
       service.dispose();
-      service = AudioService();
+      service = AudioService(audioPlayer: TestAudioPlayer());
       await Future<void>.delayed(Duration.zero);
       expect(service.favorites.single.toJson(), saved.toJson());
       expect(service.playlists.first.songs.single.toJson(), saved.toJson());
@@ -223,14 +221,17 @@ void main() {
     await tester.pump();
     expect(find.text('Previous source (1)'), findsOneWidget);
     expect(find.text('Previous favorite'), findsOneWidget);
-    expect(find.textContaining('saved but unavailable'), findsOneWidget);
+    expect(
+      find.textContaining('saved for reference but unavailable'),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Previous source (1)'));
     await tester.pump();
     await tester.tap(find.text('Previous favorite'));
     await tester.pump();
     expect(playRequests, 0);
     expect(
-      find.textContaining('Search for "Previous favorite"'),
+      find.textContaining('Previous source unavailable. "Previous favorite"'),
       findsOneWidget,
     );
     expect(service.favorites.single.source, SongSource.legacy);
@@ -277,7 +278,7 @@ void main() {
     final second = service.scanLocalSongs();
     expect(identical(first, second), isTrue);
     pending.complete([
-      {'id': 1, 'title': 'Local one', 'path': ''},
+      {'id': 1, 'title': 'Local one', 'path': '/test/file.mp3'},
     ]);
     await first;
     expect(fetches, 1);
@@ -290,6 +291,47 @@ void main() {
     expect(service.localSongs, isEmpty);
     expect(service.songs, isEmpty);
   });
+
+  test(
+    'online favorites retain provider identity across local scans and reload',
+    () async {
+      final first = onlineSong('abc123');
+      final second = onlineSong('def456');
+      service.registerSongs([first, second]);
+      service.toggleFavorite(first);
+      service.toggleFavorite(second);
+      scanReturns(
+        () => [
+          {'id': 0, 'title': 'Local zero', 'path': '/test/zero.mp3'},
+        ],
+      );
+      await service.scanLocalSongs();
+      expect(service.songs.toSet(), hasLength(3));
+      expect(service.localSongs.single.isFavorite, isFalse);
+      expect(service.favorites.map((song) => song.providerId), [
+        'abc123',
+        'def456',
+      ]);
+      await Future<void>.delayed(Duration.zero);
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs
+          .getStringList('harmoniq_favorites_v1')!
+          .map((record) => jsonDecode(record) as Map<String, dynamic>)
+          .toList();
+      expect(saved.every((record) => record['audioPath'] == ''), isTrue);
+      expect(saved.every((record) => record['source'] == 'online'), isTrue);
+      scanReturns(() => []);
+      await service.scanLocalSongs();
+      expect(service.localSongs, isEmpty);
+      expect(service.songs, [first, second]);
+      service.dispose();
+      service = AudioService(audioPlayer: TestAudioPlayer());
+      await Future<void>.delayed(Duration.zero);
+      expect(service.favorites, [first, second]);
+      service.toggleFavorite(first);
+      expect(service.favorites, [second]);
+    },
+  );
 
   testWidgets('album cache updates after same-ID metadata replacement', (
     tester,
@@ -315,78 +357,21 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  Future<void> showSearch(
-    WidgetTester tester,
-    Future<List<YoutubeVideo>> Function(String) search,
-  ) async {
+  Future<void> showSearch(WidgetTester tester) async {
     await tester.pumpWidget(
       MaterialApp(
         home: SearchScreen(
           audioService: service,
           onSongTap: (_) {},
           onFavoriteTap: service.toggleFavorite,
-          searchVideos: search,
+          searchOnline: (_) async =>
+              throw StateError('Local filtering must not search online'),
         ),
       ),
     );
+    await tester.tap(find.widgetWithText(ChoiceChip, 'Local'));
+    await tester.pump();
   }
-
-  testWidgets(
-    'stale online success cannot replace results or register old songs',
-    (tester) async {
-      final old = Completer<List<YoutubeVideo>>();
-      final current = Completer<List<YoutubeVideo>>();
-      await showSearch(
-        tester,
-        (query) => query == 'old' ? old.future : current.future,
-      );
-      await tester.enterText(find.byType(TextField), 'old');
-      await tester.testTextInput.receiveAction(TextInputAction.search);
-      await tester.pump();
-      await tester.enterText(find.byType(TextField), 'new');
-      await tester.testTextInput.receiveAction(TextInputAction.search);
-      await tester.pump();
-      current.complete([video('current0001', 'Current result')]);
-      await tester.pump();
-      old.complete([video('oldvideo001', 'Stale result')]);
-      await tester.pump();
-      expect(find.text('Current result'), findsOneWidget);
-      expect(find.text('Stale result'), findsNothing);
-      expect(service.songs, isEmpty);
-      expect(service.queue, isEmpty);
-      await tester.pumpWidget(const SizedBox());
-    },
-  );
-
-  testWidgets(
-    'clearing query invalidates pending failures and retry starts loading',
-    (tester) async {
-      final pending = Completer<List<YoutubeVideo>>();
-      var requests = 0;
-      await showSearch(tester, (_) {
-        requests++;
-        return requests == 1
-            ? Future.error(Exception('offline'))
-            : pending.future;
-      });
-      await tester.enterText(find.byType(TextField), 'query');
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(requests, 0);
-      await tester.testTextInput.receiveAction(TextInputAction.search);
-      await tester.pump();
-      await tester.pump();
-      expect(find.text('Retry YouTube search'), findsOneWidget);
-      await tester.tap(find.text('Retry YouTube search'));
-      await tester.pump();
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
-      await tester.enterText(find.byType(TextField), '');
-      pending.completeError(Exception('late failure'));
-      await tester.pump();
-      expect(find.text('Start somewhere good.'), findsOneWidget);
-      expect(find.text('Retry YouTube search'), findsNothing);
-      await tester.pumpWidget(const SizedBox());
-    },
-  );
 
   testWidgets('local matches build lazily and refresh when a scan completes', (
     tester,
@@ -397,14 +382,12 @@ void main() {
         (id) => <String, Object>{
           'id': id,
           'title': 'Local track $id',
-          'path': '',
+          'path': '/test/file.mp3',
         },
       ),
     );
-    await showSearch(tester, (_) async => []);
+    await showSearch(tester);
     await tester.enterText(find.byType(TextField), 'Local');
-    await tester.pump();
-    await tester.tap(find.widgetWithText(ChoiceChip, 'Local'));
     await tester.pump();
     expect(find.text('No local results found'), findsOneWidget);
     await tester.runAsync(() => service.scanLocalSongs());

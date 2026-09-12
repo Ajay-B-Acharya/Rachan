@@ -1,57 +1,42 @@
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
-import '../models/youtube_video.dart';
 import '../services/audio_service.dart';
-import '../services/youtube_links.dart';
-import '../services/youtube_catalog.dart';
+import '../services/online_music_service.dart';
 import '../theme/app_colors.dart';
-import '../widgets/motion.dart';
 import '../widgets/song_tile.dart';
-import '../widgets/youtube_card.dart';
-
-enum SearchFilter { all, local, online }
 
 class SearchScreen extends StatefulWidget {
   final AudioService audioService;
   final ValueChanged<Song> onSongTap;
   final ValueChanged<Song> onFavoriteTap;
-  final Future<List<YoutubeVideo>> Function(String)? searchVideos;
-  final bool? youtubeConfigured;
-  final ValueChanged<YoutubeVideo>? onVideoTap;
-  final void Function(YoutubeVideo, List<YoutubeVideo>)? onVideoQueueTap;
+  final void Function(Song, List<Song>)? onQueueTap;
+  final Future<List<Song>> Function(String)? searchOnline;
 
   const SearchScreen({
     super.key,
     required this.audioService,
     required this.onSongTap,
     required this.onFavoriteTap,
-    this.searchVideos,
-    this.youtubeConfigured,
-    this.onVideoTap,
-    this.onVideoQueueTap,
+    this.onQueueTap,
+    this.searchOnline,
   });
-
   @override
   State<SearchScreen> createState() => SearchScreenState();
 }
 
 class SearchScreenState extends State<SearchScreen> {
   final _controller = TextEditingController();
-  SearchFilter _filter = SearchFilter.all;
-  List<Song> _local = [];
-  List<YoutubeVideo> _videos = [];
   String _query = '';
-  String? _submitted;
-  String? _error;
+  String? _cachedQuery;
+  int _revision = -1;
+  int _request = 0;
+  List<Song> _matches = [];
+  List<Song> _online = [];
   bool _loading = false;
-  int _generation = 0;
-  int _localRevision = -1;
-  String? _localQuery;
-  final List<String> _recent = [];
-  bool get _configured =>
-      widget.youtubeConfigured ??
-      (widget.searchVideos != null || YoutubeCatalog.instance.isAvailable);
+  String? _error;
+  bool _submitted = false;
+  int _filter = 0;
 
   @override
   void initState() {
@@ -61,6 +46,7 @@ class SearchScreenState extends State<SearchScreen> {
 
   @override
   void dispose() {
+    _request++;
     _controller.dispose();
     super.dispose();
   }
@@ -72,88 +58,44 @@ class SearchScreenState extends State<SearchScreen> {
 
   void _changed() {
     final query = _controller.text.trim();
-    if (query == _query) return;
-    setState(() {
-      _query = query;
-      _generation++;
-      _loading = false;
-      _videos = [];
-      _error = null;
-      _submitted = null;
-      _refreshLocal();
-    });
+    if (_query != query) {
+      setState(() {
+        _query = query;
+        _request++;
+        _online = [];
+        _submitted = false;
+        _loading = false;
+        _error = null;
+      });
+    }
   }
 
-  void _refreshLocal() {
-    if (_localRevision == widget.audioService.localSongsRevision &&
-        _localQuery == _query) {
-      return;
-    }
-    _localRevision = widget.audioService.localSongsRevision;
-    _localQuery = _query;
-    final lower = _query.toLowerCase();
-    _local = lower.isEmpty
-        ? []
-        : widget.audioService.localSongs
-              .where(
-                (song) =>
-                    song.title.toLowerCase().contains(lower) ||
-                    song.artist.toLowerCase().contains(lower) ||
-                    song.album.toLowerCase().contains(lower),
-              )
-              .toList();
-  }
-
-  Future<void> _submit() async {
-    if (_query.isEmpty || _filter == SearchFilter.local) return;
-    final id = YoutubeLinks.videoIdFromInput(_query);
-    if (id != null) {
-      widget.onVideoTap?.call(
-        YoutubeVideo(
-          id: id,
-          title: 'YouTube track',
-          artist: 'YouTube',
-          thumbnailUrl: 'https://i.ytimg.com/vi/$id/hqdefault.jpg',
-        ),
-      );
-      return;
-    }
-    if (!_configured) return;
+  Future<void> _search() async {
+    if (_query.isEmpty || _filter == 2) return;
+    final request = ++_request;
     final query = _query;
-    final generation = ++_generation;
     setState(() {
       _loading = true;
       _error = null;
-      _submitted = query;
+      _submitted = true;
     });
     try {
-      final result =
-          await (widget.searchVideos?.call(query) ??
-              YoutubeCatalog.instance.search(query));
-      if (!mounted || generation != _generation) return;
+      final results =
+          await (widget.searchOnline?.call(query) ??
+              OnlineMusicService.instance.search(query));
+      if (!mounted || request != _request) return;
+      widget.audioService.registerSongs(results);
       setState(() {
-        _videos = result;
+        _online = results;
         _loading = false;
-        _recent.remove(query);
-        _recent.insert(0, query);
-        if (_recent.length > 6) _recent.removeLast();
       });
-    } catch (error) {
-      if (!mounted || generation != _generation) return;
-      setState(() {
-        _loading = false;
-        _error = error is YoutubeSourceException
-            ? error.message
-            : 'Could not load YouTube results. Please try again.';
-      });
-    }
-  }
-
-  void _playResult(YoutubeVideo video) {
-    if (widget.onVideoQueueTap != null) {
-      widget.onVideoQueueTap!(video, _videos);
-    } else {
-      widget.onVideoTap?.call(video);
+    } catch (_) {
+      if (mounted && request == _request) {
+        setState(() {
+          _loading = false;
+          _error = 'Could not search online music. Please try again.';
+        });
+      }
     }
   }
 
@@ -166,68 +108,217 @@ class SearchScreenState extends State<SearchScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            EnterTransition(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Chase that sound.',
-                    style: Theme.of(context).textTheme.headlineMedium,
-                  ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'YouTube discoveries. Your offline favorites.',
-                    style: TextStyle(color: AppColors.textMuted, fontSize: 12),
-                  ),
-                ],
-              ),
+            Text(
+              'Find your sound.',
+              style: Theme.of(context).textTheme.headlineMedium,
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Discover on Audius. Keep your device favorites.',
+              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
             ),
             const SizedBox(height: 22),
             TextField(
               controller: _controller,
               textInputAction: TextInputAction.search,
-              onSubmitted: (_) => _submit(),
-              style: const TextStyle(fontSize: 14),
+              onSubmitted: (_) => _search(),
               decoration: InputDecoration(
-                hintText: 'Songs, artists, or a YouTube link',
-                hintStyle: const TextStyle(
-                  fontSize: 13,
-                  color: AppColors.textMuted,
-                ),
-                prefixIcon: const Icon(Icons.search_rounded, size: 21),
-                suffixIcon: _query.isNotEmpty
-                    ? IconButton(
+                hintText: 'Search songs, artists, or genres',
+                prefixIcon: const Icon(Icons.search_rounded),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
                         tooltip: 'Clear search',
                         onPressed: _controller.clear,
-                        icon: const Icon(Icons.close_rounded, size: 19),
-                      )
-                    : null,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 18,
-                ),
+                        icon: const Icon(Icons.close_rounded),
+                      ),
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 14),
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
-                  _chip('All', SearchFilter.all),
-                  const SizedBox(width: 8),
-                  _chip('Local', SearchFilter.local),
-                  const SizedBox(width: 8),
-                  _chip('YouTube', SearchFilter.online),
+                  for (final entry in [(0, 'All'), (1, 'Online'), (2, 'Local')])
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        label: Text(entry.$2),
+                        selected: _filter == entry.$1,
+                        showCheckmark: false,
+                        selectedColor: AppColors.accent,
+                        labelStyle: TextStyle(
+                          color: _filter == entry.$1
+                              ? AppColors.background
+                              : AppColors.textSecondary,
+                        ),
+                        onSelected: (_) => setState(() {
+                          _filter = entry.$1;
+                          if (_filter == 2) {
+                            _request++;
+                            _loading = false;
+                          }
+                        }),
+                      ),
+                    ),
                 ],
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             Expanded(
               child: ListenableBuilder(
                 listenable: widget.audioService,
                 builder: (context, _) {
-                  _refreshLocal();
-                  return _query.isEmpty ? _empty() : _results();
+                  if (_cachedQuery != _query ||
+                      _revision != widget.audioService.localSongsRevision) {
+                    _cachedQuery = _query;
+                    _revision = widget.audioService.localSongsRevision;
+                    final lower = _query.toLowerCase();
+                    _matches = widget.audioService.localSongs
+                        .where(
+                          (song) =>
+                              lower.isEmpty ||
+                              song.title.toLowerCase().contains(lower) ||
+                              song.artist.toLowerCase().contains(lower) ||
+                              song.album.toLowerCase().contains(lower),
+                        )
+                        .toList();
+                  }
+                  return CustomScrollView(
+                    slivers: [
+                      if (_filter != 2) ...[
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 18),
+                            child: _query.isEmpty
+                                ? Container(
+                                    padding: const EdgeInsets.all(20),
+                                    decoration: BoxDecoration(
+                                      color: AppColors.backgroundSurface,
+                                      borderRadius: BorderRadius.circular(18),
+                                    ),
+                                    child: const Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'A new favorite awaits.',
+                                          style: TextStyle(
+                                            fontSize: 19,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        SizedBox(height: 9),
+                                        Text(
+                                          'Search independent artists, original music, and edits from Audius. Public, full-length tracks only.',
+                                          style: TextStyle(
+                                            color: AppColors.textSecondary,
+                                            height: 1.4,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  )
+                                : Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: FilledButton.icon(
+                                      onPressed: _loading ? null : _search,
+                                      icon: const Icon(
+                                        Icons.search_rounded,
+                                        size: 18,
+                                      ),
+                                      label: Text(
+                                        _error == null
+                                            ? 'Search online'
+                                            : 'Retry online search',
+                                      ),
+                                    ),
+                                  ),
+                          ),
+                        ),
+                        if (_loading)
+                          const SliverToBoxAdapter(
+                            child: Padding(
+                              padding: EdgeInsets.all(24),
+                              child: Center(
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (_error != null)
+                          SliverToBoxAdapter(
+                            child: Padding(
+                              padding: const EdgeInsets.only(bottom: 18),
+                              child: Text(
+                                _error!,
+                                style: const TextStyle(
+                                  color: AppColors.textSecondary,
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (_online.isNotEmpty)
+                          const SliverToBoxAdapter(
+                            child: Padding(
+                              padding: EdgeInsets.only(bottom: 12),
+                              child: Text(
+                                'Online results · Audius',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            ),
+                          ),
+                        _songs(_online),
+                        if (_submitted &&
+                            !_loading &&
+                            _error == null &&
+                            _online.isEmpty)
+                          const SliverToBoxAdapter(
+                            child: Padding(
+                              padding: EdgeInsets.only(bottom: 24),
+                              child: Text(
+                                'No public tracks found. Try another artist or genre.',
+                                style: TextStyle(color: AppColors.textMuted),
+                              ),
+                            ),
+                          ),
+                      ],
+                      if (_filter != 1) ...[
+                        const SliverToBoxAdapter(
+                          child: Padding(
+                            padding: EdgeInsets.symmetric(vertical: 12),
+                            child: Text(
+                              'On your device',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (_matches.isEmpty)
+                          SliverToBoxAdapter(
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 20),
+                              child: Text(
+                                _query.isEmpty
+                                    ? 'Scan your songs in the Local tab.'
+                                    : 'No local results found',
+                                style: const TextStyle(
+                                  color: AppColors.textMuted,
+                                ),
+                              ),
+                            ),
+                          ),
+                        _songs(_matches),
+                      ],
+                      const SliverToBoxAdapter(child: SizedBox(height: 28)),
+                    ],
+                  );
                 },
               ),
             ),
@@ -237,245 +328,26 @@ class SearchScreenState extends State<SearchScreen> {
     ),
   );
 
-  Widget _chip(String text, SearchFilter filter) => ChoiceChip(
-    label: Text(text),
-    selected: _filter == filter,
-    showCheckmark: false,
-    selectedColor: AppColors.accent,
-    labelStyle: TextStyle(
-      color: _filter == filter ? AppColors.background : AppColors.textSecondary,
-      fontWeight: FontWeight.w600,
-    ),
-    onSelected: (_) => setState(() {
-      _filter = filter;
-      if (filter == SearchFilter.local) {
-        _generation++;
-        _loading = false;
-      }
-    }),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-    side: BorderSide.none,
-  );
-
-  Widget _empty() => ListView(
-    children: [
-      _youtubeBridge(),
-      const SizedBox(height: 28),
-      if (_recent.isNotEmpty) ...[
-        const Text(
-          'Recent searches',
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-        ),
-        ..._recent.map(
-          (query) => ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.history_rounded, size: 18),
-            title: Text(query),
-            trailing: const Icon(Icons.north_west_rounded, size: 17),
-            onTap: () => setQuery(query),
-          ),
-        ),
-        const SizedBox(height: 20),
-      ],
-      const Text(
-        'Start somewhere good.',
-        style: TextStyle(fontSize: 19, fontWeight: FontWeight.w600),
-      ),
-      const SizedBox(height: 14),
-      Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children:
-            [
-                  'Indie discoveries',
-                  'Live sessions',
-                  'Lo-fi beats',
-                  'Hindi hits',
-                  'Jazz after dark',
-                  'Electronic',
-                ]
-                .map(
-                  (tag) => ActionChip(
-                    label: Text(tag),
-                    onPressed: () => setQuery(tag),
-                    side: const BorderSide(color: Colors.white12),
-                    backgroundColor: Colors.transparent,
-                  ),
-                )
-                .toList(),
-      ),
-      const SizedBox(height: 32),
-      const Text(
-        'Have a link? Paste a YouTube or YouTube Music URL above to load its audio in Harmoniq.',
-        style: TextStyle(color: AppColors.textMuted, fontSize: 12, height: 1.5),
-      ),
-      const SizedBox(height: 28),
-    ],
-  );
-
-  Widget _results() {
-    final showLocal = _filter != SearchFilter.online;
-    final showOnline = _filter != SearchFilter.local;
-    final id = YoutubeLinks.videoIdFromInput(_query);
-    return CustomScrollView(
-      slivers: [
-        if (showOnline) ...[
-          if (!_configured && id == null)
-            SliverToBoxAdapter(child: _youtubeBridge()),
-          if (id != null)
-            SliverToBoxAdapter(
-              child: FilledButton.icon(
-                onPressed: _submit,
-                icon: const Icon(Icons.play_circle_outline_rounded),
-                label: const Text('Play this song'),
-              ),
-            )
-          else if (_configured)
-            SliverToBoxAdapter(
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: FilledButton.icon(
-                  onPressed: _loading ? null : _submit,
-                  icon: const Icon(Icons.search_rounded, size: 18),
-                  label: Text(
-                    _error != null ? 'Retry YouTube search' : 'Search YouTube',
-                  ),
-                ),
-              ),
-            ),
-          const SliverToBoxAdapter(child: SizedBox(height: 18)),
-          if (_loading)
-            const SliverToBoxAdapter(
-              child: Center(
-                child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
-            ),
-          if (_error != null)
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 18),
-                child: Text(
-                  _error!,
-                  style: const TextStyle(color: AppColors.textSecondary),
-                ),
-              ),
-            ),
-          if (_videos.isNotEmpty)
-            SliverList.builder(
-              itemCount: _videos.length,
-              itemBuilder: (context, index) => Padding(
-                padding: const EdgeInsets.only(bottom: 24),
-                child: YoutubeCard(
-                  video: _videos[index],
-                  onTap: () => _playResult(_videos[index]),
-                ),
-              ),
-            ),
-          if (!_loading &&
-              _error == null &&
-              _submitted == _query &&
-              _videos.isEmpty)
-            const SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.only(bottom: 20),
-                child: Text(
-                  'No YouTube tracks found. Try a different artist or song.',
-                  style: TextStyle(color: AppColors.textSecondary),
-                ),
-              ),
-            ),
-        ],
-        if (showLocal) ...[
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Text(
-                'On your device · ${_local.length}',
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 16,
-                ),
-              ),
-            ),
-          ),
-          if (_local.isEmpty)
-            const SliverToBoxAdapter(
-              child: Text(
-                'No local results found',
-                style: TextStyle(color: AppColors.textMuted),
-              ),
-            ),
-          SliverList.builder(
-            itemCount: _local.length,
-            itemBuilder: (context, index) {
-              final song = _local[index].copyWith(
-                isFavorite: widget.audioService.isSongFavorite(_local[index]),
-              );
-              final active = widget.audioService.currentSong == song;
-              return SongTile(
-                song: song,
-                isActive: active,
-                isPlaying: active && widget.audioService.isPlaying,
-                onTap: () => widget.onSongTap(song),
-                onFavoriteTap: () => widget.onFavoriteTap(song),
-              );
-            },
-          ),
-        ],
-        const SliverToBoxAdapter(child: SizedBox(height: 32)),
-      ],
-    );
-  }
-
-  Widget _youtubeBridge() => Container(
-    padding: const EdgeInsets.all(20),
-    decoration: BoxDecoration(
-      color: const Color(0xFF292125),
-      borderRadius: BorderRadius.circular(20),
-      border: Border.all(color: const Color(0xFF493137)),
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Row(
-          children: [
-            Icon(
-              Icons.play_circle_fill_rounded,
-              color: Color(0xFFFF777B),
-              size: 24,
-            ),
-            SizedBox(width: 9),
-            Expanded(
-              child: Text(
-                'Play here. Stay here.',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Text(
-          _configured
-              ? 'Search above, choose a track, and listen with artwork, queue, and native audio controls.'
-              : 'Android supports no-key search and native online audio. The browser preview cannot resolve audio streams.',
-          style: const TextStyle(
-            fontSize: 13,
-            color: AppColors.textSecondary,
-            height: 1.5,
-          ),
-        ),
-        if (!_configured)
-          const Padding(
-            padding: EdgeInsets.only(top: 8),
-            child: Text(
-              'No external app will be opened.',
-              style: TextStyle(fontSize: 11, color: AppColors.textMuted),
-            ),
-          ),
-      ],
-    ),
+  Widget _songs(List<Song> songs) => SliverList.builder(
+    itemCount: songs.length,
+    itemBuilder: (context, index) {
+      final song = songs[index].copyWith(
+        isFavorite: widget.audioService.isSongFavorite(songs[index]),
+      );
+      final active = widget.audioService.currentSong == song;
+      return SongTile(
+        song: song,
+        isActive: active,
+        isPlaying: active && widget.audioService.isPlaying,
+        onTap: () {
+          if (widget.onQueueTap != null) {
+            widget.onQueueTap!(song, songs);
+          } else {
+            widget.onSongTap(song);
+          }
+        },
+        onFavoriteTap: () => widget.onFavoriteTap(song),
+      );
+    },
   );
 }
