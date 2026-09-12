@@ -13,9 +13,9 @@ class AppColors {
   ); // Premium iOS/Spotify red for favorites
 
   // Glassmorphic Colors
-  static final Color glassBackground = Colors.white.withOpacity(0.06);
-  static final Color glassBorder = Colors.white.withOpacity(0.10);
-  static final Color glassShadow = Colors.black.withOpacity(0.3);
+  static final Color glassBackground = Colors.white.withValues(alpha: 0.06);
+  static final Color glassBorder = Colors.white.withValues(alpha: 0.10);
+  static final Color glassShadow = Colors.black.withValues(alpha: 0.3);
 
   // Text Colors
   static const Color textPrimary = Colors.white;

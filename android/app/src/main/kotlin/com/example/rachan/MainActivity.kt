@@ -9,12 +9,15 @@ import android.provider.MediaStore
 import androidx.annotation.NonNull
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import io.flutter.embedding.android.FlutterActivity
+import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : FlutterActivity() {
-    private val CHANNEL = "com.example.rachan/local_music"
+// audio_service (used by just_audio_background) requires the Activity to
+// extend AudioServiceActivity instead of FlutterActivity so it can bind to
+// the background audio service correctly.
+class MainActivity : AudioServiceActivity() {
+    private val CHANNEL = "com.example.harmoniq/local_music"
     private val PERMISSION_REQUEST_CODE = 1001
     private var pendingResult: MethodChannel.Result? = null
 
@@ -25,9 +28,12 @@ class MainActivity : FlutterActivity() {
                 "checkPermission" -> {
                     result.success(checkMusicPermission())
                 }
-                "requestPermission" -> {
+                "checkAllPermissions" -> {
+                    result.success(checkAllPermissions())
+                }
+                "requestPermission", "requestAllPermissions" -> {
                     pendingResult = result
-                    requestMusicPermission()
+                    requestRequiredPermissions()
                 }
                 "fetchLocalSongs" -> {
                     if (checkMusicPermission()) {
@@ -43,7 +49,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun getRequiredPermission(): String {
+    private fun getStoragePermission(): String {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             Manifest.permission.READ_MEDIA_AUDIO
         } else {
@@ -52,32 +58,65 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun checkMusicPermission(): Boolean {
-        val permission = getRequiredPermission()
+        val permission = getStoragePermission()
         return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun requestMusicPermission() {
-        val permission = getRequiredPermission()
-        if (checkMusicPermission()) {
-            pendingResult?.success(true)
-            pendingResult = null
+    private fun checkNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
         } else {
-            ActivityCompat.requestPermissions(this, arrayOf(permission), PERMISSION_REQUEST_CODE)
+            true
         }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    private fun checkAllPermissions(): Map<String, Boolean> {
+        val storage = checkMusicPermission()
+        val notification = checkNotificationPermission()
+        return mapOf(
+            "storage" to storage,
+            "notification" to notification,
+            "allGranted" to (storage && notification)
+        )
+    }
+
+    private fun requestRequiredPermissions() {
+        val permissionsToRequest = mutableListOf<String>()
+        if (!checkMusicPermission()) {
+            permissionsToRequest.add(getStoragePermission())
+        }
+        if (!checkNotificationPermission() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        if (permissionsToRequest.isEmpty()) {
+            pendingResult?.success(true)
+            pendingResult = null
+        } else {
+            ActivityCompat.requestPermissions(
+                this, permissionsToRequest.toTypedArray(), PERMISSION_REQUEST_CODE
+            )
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == PERMISSION_REQUEST_CODE) {
-            val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
-            pendingResult?.success(granted)
+            val storageGranted = checkMusicPermission()
+            pendingResult?.success(storageGranted)
             pendingResult = null
         }
     }
 
     private fun fetchLocalSongs(): List<Map<String, Any>> {
         val songsList = mutableListOf<Map<String, Any>>()
-        
+
         val uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
@@ -87,40 +126,38 @@ class MainActivity : FlutterActivity() {
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.DATA
         )
-
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
         val sortOrder = "${MediaStore.Audio.Media.TITLE} ASC"
 
         val cursor: Cursor? = contentResolver.query(uri, projection, selection, null, sortOrder)
-
         cursor?.use {
-            val idColumn = it.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-            val titleColumn = it.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
-            val artistColumn = it.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
-            val albumColumn = it.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
-            val durationColumn = it.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
-            val dataColumn = it.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+            val idCol       = it.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+            val titleCol    = it.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+            val artistCol   = it.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+            val albumCol    = it.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+            val durationCol = it.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
 
             while (it.moveToNext()) {
-                val id = it.getLong(idColumn)
-                val title = it.getString(titleColumn) ?: "Unknown Title"
-                val artist = it.getString(artistColumn) ?: "Unknown Artist"
-                val album = it.getString(albumColumn) ?: "Unknown Album"
-                val duration = it.getLong(durationColumn)
-                val path = it.getString(dataColumn) ?: ""
+                val id       = it.getLong(idCol)
+                val title    = it.getString(titleCol)    ?: "Unknown Title"
+                val artist   = it.getString(artistCol)   ?: "Unknown Artist"
+                val album    = it.getString(albumCol)    ?: "Unknown Album"
+                val duration = it.getLong(durationCol)
 
-                // Create a standard media content URI
-                val contentUri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id).toString()
+                val contentUri = ContentUris.withAppendedId(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id
+                ).toString()
 
-                val songMap = mapOf(
-                    "id" to id.toInt(),
-                    "title" to title,
-                    "artist" to artist,
-                    "album" to album,
-                    "duration" to duration,
-                    "path" to contentUri
+                songsList.add(
+                    mapOf(
+                        "id"       to id.toInt(),
+                        "title"    to title,
+                        "artist"   to artist,
+                        "album"    to album,
+                        "duration" to duration,
+                        "path"     to contentUri
+                    )
                 )
-                songsList.add(songMap)
             }
         }
         return songsList

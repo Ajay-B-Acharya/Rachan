@@ -9,8 +9,7 @@ class AppTheme {
       brightness: Brightness.dark,
       scaffoldBackgroundColor: AppColors.background,
       colorScheme: const ColorScheme.dark(
-        background: AppColors.background,
-        surface: AppColors.backgroundSurface,
+        surface: AppColors.background,
         primary: AppColors.accent,
         onPrimary: Colors.white,
         secondary: AppColors.accentLight,
@@ -53,9 +52,9 @@ class AppTheme {
       ),
       sliderTheme: SliderThemeData(
         activeTrackColor: AppColors.accent,
-        inactiveTrackColor: Colors.white.withOpacity(0.1),
+        inactiveTrackColor: Colors.white.withValues(alpha: 0.1),
         thumbColor: Colors.white,
-        overlayColor: AppColors.accent.withOpacity(0.15),
+        overlayColor: AppColors.accent.withValues(alpha: 0.15),
         trackHeight: 3.5,
         thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
         overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),

@@ -1,20 +1,24 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
+import '../services/audio_service.dart';
+import '../services/jamendo_service.dart';
 import '../theme/app_colors.dart';
-import '../widgets/song_tile.dart';
 import '../widgets/glass_card.dart';
+import '../widgets/song_tile.dart';
+
+enum SearchFilter { all, local, online }
 
 class SearchScreen extends StatefulWidget {
-  final List<Song> songs;
-  final Song? currentSong;
+  final AudioService audioService;
   final Function(Song) onSongTap;
   final Function(Song) onFavoriteTap;
 
   const SearchScreen({
     super.key,
-    required this.songs,
-    required this.currentSong,
+    required this.audioService,
     required this.onSongTap,
     required this.onFavoriteTap,
   });
@@ -25,11 +29,25 @@ class SearchScreen extends StatefulWidget {
 
 class _SearchScreenState extends State<SearchScreen> {
   final TextEditingController _searchController = TextEditingController();
-  List<Song> _filteredSongs = [];
-  bool _isSearching = false;
+  final JamendoService _jamendoService = JamendoService.instance;
 
-  // Recent Searches Mock Data
-  final List<String> _recentSearches = ["Midnight", "Rayan", "Chill"];
+  SearchFilter _selectedFilter = SearchFilter.all;
+
+  List<Song> _localResults = [];
+  List<Song> _onlineResults = [];
+
+  bool _isSearching = false;
+  bool _isOnlineLoading = false;
+  String? _onlineError;
+
+  Timer? _debounceTimer;
+
+  final List<String> _recentSearches = [
+    'Rock',
+    'Electronic',
+    'Chillout',
+    'Acoustic',
+  ];
 
   @override
   void initState() {
@@ -39,31 +57,82 @@ class _SearchScreenState extends State<SearchScreen> {
 
   @override
   void dispose() {
+    _debounceTimer?.cancel();
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
     super.dispose();
   }
 
   void _onSearchChanged() {
-    final query = _searchController.text.toLowerCase().trim();
+    final query = _searchController.text.trim();
     if (query.isEmpty) {
+      _debounceTimer?.cancel();
       setState(() {
-        _filteredSongs = [];
+        _localResults = [];
+        _onlineResults = [];
         _isSearching = false;
+        _isOnlineLoading = false;
+        _onlineError = null;
       });
       return;
     }
 
-    final results = widget.songs.where((song) {
-      return song.title.toLowerCase().contains(query) ||
-          song.artist.toLowerCase().contains(query) ||
-          song.album.toLowerCase().contains(query);
+    final lowerQuery = query.toLowerCase();
+
+    // Instant local results filter
+    final localMatches = widget.audioService.localSongs.where((song) {
+      return song.title.toLowerCase().contains(lowerQuery) ||
+          song.artist.toLowerCase().contains(lowerQuery) ||
+          song.album.toLowerCase().contains(lowerQuery);
     }).toList();
 
     setState(() {
-      _filteredSongs = results;
       _isSearching = true;
+      _localResults = localMatches;
+      _isOnlineLoading = true;
+      _onlineError = null;
     });
+
+    // Debounce online Jamendo search requests (450ms)
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 450), () {
+      _performOnlineSearch(query);
+    });
+  }
+
+  Future<void> _performOnlineSearch(String query) async {
+    if (!mounted) return;
+    try {
+      final results = await _jamendoService.searchTracks(query, limit: 30);
+      if (!mounted) return;
+
+      widget.audioService.registerSongs(results);
+
+      setState(() {
+        _onlineResults = results;
+        _isOnlineLoading = false;
+        _onlineError = null;
+      });
+
+      // Save to recent searches if found
+      if (results.isNotEmpty && !_recentSearches.contains(query)) {
+        _recentSearches.insert(0, query);
+        if (_recentSearches.length > 8) _recentSearches.removeLast();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isOnlineLoading = false;
+        _onlineError = 'Network error loading online results';
+      });
+    }
+  }
+
+  void _triggerSearchWithTag(String tag) {
+    _searchController.text = tag;
+    _searchController.selection = TextSelection.fromPosition(
+      TextPosition(offset: tag.length),
+    );
   }
 
   @override
@@ -87,24 +156,26 @@ class _SearchScreenState extends State<SearchScreen> {
               children: [
                 const SizedBox(height: 24),
                 Text(
-                  "Search",
+                  'Search',
                   style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: -0.6,
-                  ),
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.6,
+                      ),
                 ),
-                const SizedBox(height: 20),
-                // Search Input Field
+                const SizedBox(height: 18),
+
+                // ── Search Input Field ────────────────────────────────────────
                 GlassCard(
                   borderRadius: 14,
-                  blurSigma: 8,
+                  blurSigma: 0,
                   padding: const EdgeInsets.symmetric(horizontal: 12),
-                  color: Colors.white.withOpacity(0.05),
+                  color: Colors.white.withValues(alpha: 0.05),
+                  borderColor: Colors.white.withValues(alpha: 0.12),
                   child: TextField(
                     controller: _searchController,
                     style: const TextStyle(color: Colors.white, fontSize: 15),
                     decoration: InputDecoration(
-                      hintText: "Search songs, artists, albums...",
+                      hintText: 'Search songs, artists, Jamendo...',
                       hintStyle: const TextStyle(
                         color: AppColors.textMuted,
                         fontSize: 14,
@@ -121,21 +192,26 @@ class _SearchScreenState extends State<SearchScreen> {
                                 color: Colors.white,
                                 size: 20,
                               ),
-                              onPressed: () {
-                                _searchController.clear();
-                              },
+                              onPressed: _searchController.clear,
                             )
                           : null,
                       border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                      contentPadding:
+                          const EdgeInsets.symmetric(vertical: 12),
                     ),
                   ),
                 ),
-                const SizedBox(height: 20),
-                // Results or Default View
+                const SizedBox(height: 14),
+
+                // ── Filter Chips (ALL, LOCAL, ONLINE) ─────────────────────────
+                if (_isSearching) _buildFilterTabs(),
+
+                const SizedBox(height: 12),
+
+                // ── Body (Search Results or Default Categories) ───────────────
                 Expanded(
                   child: _isSearching
-                      ? _buildSearchResults()
+                      ? _buildSearchResultsView()
                       : _buildDefaultView(),
                 ),
               ],
@@ -146,52 +222,233 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  Widget _buildSearchResults() {
-    if (_filteredSongs.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.search_off_rounded,
-              size: 56,
-              color: AppColors.textMuted.withOpacity(0.4),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              "No results found",
-              style: Theme.of(context).textTheme.titleLarge
-                  ?.copyWith(color: AppColors.textSecondary, fontSize: 16),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              "Double check the spelling or try another query",
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyMedium
-                  ?.copyWith(color: AppColors.textMuted, fontSize: 12.5),
-            ),
-            const SizedBox(height: 100),
-          ],
-        ),
-      );
-    }
+  Widget _buildFilterTabs() {
+    return SizedBox(
+      height: 34,
+      child: Row(
+        children: [
+          _buildFilterChip('ALL', SearchFilter.all),
+          const SizedBox(width: 8),
+          _buildFilterChip('LOCAL', SearchFilter.local),
+          const SizedBox(width: 8),
+          _buildFilterChip('ONLINE (JAMENDO)', SearchFilter.online),
+        ],
+      ),
+    );
+  }
 
-    return ListView.builder(
-      physics: const BouncingScrollPhysics(),
-      itemCount: _filteredSongs.length + 1,
-      itemBuilder: (context, index) {
-        if (index == _filteredSongs.length) {
-          return const SizedBox(height: 130);
+  Widget _buildFilterChip(String label, SearchFilter filter) {
+    final isSelected = _selectedFilter == filter;
+    return GestureDetector(
+      onTap: () => setState(() => _selectedFilter = filter),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? AppColors.accent
+              : Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(17),
+          border: Border.all(
+            color: isSelected
+                ? Colors.transparent
+                : Colors.white.withValues(alpha: 0.1),
+            width: 1,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected ? Colors.white : AppColors.textSecondary,
+            fontSize: 11,
+            fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+            letterSpacing: 0.4,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchResultsView() {
+    return ListenableBuilder(
+      listenable: widget.audioService,
+      builder: (context, _) {
+        final currentSong = widget.audioService.currentSong;
+        final isPlaying = widget.audioService.isPlaying;
+
+        final hasLocal = _localResults.isNotEmpty;
+        final hasOnline = _onlineResults.isNotEmpty;
+
+        if (!hasLocal && !hasOnline && !_isOnlineLoading) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.search_off_rounded,
+                  size: 56,
+                  color: AppColors.textMuted.withValues(alpha: 0.4),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'No results found',
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        color: AppColors.textSecondary,
+                        fontSize: 16,
+                      ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Try searching for a genre or different keyword',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: AppColors.textMuted,
+                        fontSize: 12.5,
+                      ),
+                ),
+                const SizedBox(height: 100),
+              ],
+            ),
+          );
         }
-        final song = _filteredSongs[index];
-        final isActive = widget.currentSong?.id == song.id;
-        return SongTile(
-          song: song,
-          isActive: isActive,
-          onTap: () => widget.onSongTap(song),
-          onFavoriteTap: () => widget.onFavoriteTap(song),
+
+        return ListView(
+          physics: const BouncingScrollPhysics(),
+          padding: EdgeInsets.zero,
+          children: [
+            // ── LOCAL SECTION ─────────────────────────────────────────────────
+            if ((_selectedFilter == SearchFilter.all ||
+                    _selectedFilter == SearchFilter.local) &&
+                hasLocal) ...[
+              _buildSectionTitle(
+                'Local Device Tracks',
+                _localResults.length,
+                Colors.amberAccent,
+              ),
+              const SizedBox(height: 8),
+              ..._localResults.map((song) {
+                final isActive = currentSong?.id == song.id;
+                return SongTile(
+                  song: song,
+                  isActive: isActive,
+                  isPlaying: isActive && isPlaying,
+                  onTap: () => widget.onSongTap(song),
+                  onFavoriteTap: () => widget.onFavoriteTap(song),
+                );
+              }),
+              const SizedBox(height: 20),
+            ],
+
+            // ── ONLINE JAMENDO SECTION ────────────────────────────────────────
+            if (_selectedFilter == SearchFilter.all ||
+                _selectedFilter == SearchFilter.online) ...[
+              _buildSectionTitle(
+                'Jamendo Online Tracks',
+                _onlineResults.length,
+                AppColors.accentLight,
+              ),
+              const SizedBox(height: 8),
+
+              if (_isOnlineLoading)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: Center(
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(AppColors.accent),
+                    ),
+                  ),
+                )
+              else if (_onlineError != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Center(
+                    child: Column(
+                      children: [
+                        Text(
+                          _onlineError!,
+                          style: const TextStyle(
+                            color: AppColors.textSecondary,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextButton(
+                          onPressed: () => _performOnlineSearch(
+                            _searchController.text.trim(),
+                          ),
+                          child: const Text('Retry Online Search'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else if (!hasOnline)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 20),
+                  child: Center(
+                    child: Text(
+                      'No online Jamendo tracks found for this query.',
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                )
+              else
+                ..._onlineResults.map((song) {
+                  final isActive = currentSong?.id == song.id;
+                  return SongTile(
+                    song: song,
+                    isActive: isActive,
+                    isPlaying: isActive && isPlaying,
+                    onTap: () => widget.onSongTap(song),
+                    onFavoriteTap: () => widget.onFavoriteTap(song),
+                  );
+                }),
+            ],
+
+            const SizedBox(height: 130),
+          ],
         );
       },
+    );
+  }
+
+  Widget _buildSectionTitle(String title, int count, Color accentColor) {
+    return Row(
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+            fontSize: 14.5,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+          decoration: BoxDecoration(
+            color: accentColor.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: accentColor.withValues(alpha: 0.3),
+              width: 0.8,
+            ),
+          ),
+          child: Text(
+            count.toString(),
+            style: TextStyle(
+              color: accentColor,
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -206,18 +463,16 @@ class _SearchScreenState extends State<SearchScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  "Recent Searches",
-                  style: Theme.of(context).textTheme.titleMedium
+                  'Recent Searches',
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleMedium
                       ?.copyWith(fontWeight: FontWeight.bold, fontSize: 15),
                 ),
                 TextButton(
-                  onPressed: () {
-                    setState(() {
-                      _recentSearches.clear();
-                    });
-                  },
+                  onPressed: () => setState(() => _recentSearches.clear()),
                   child: const Text(
-                    "Clear All",
+                    'Clear All',
                     style: TextStyle(
                       color: AppColors.accent,
                       fontSize: 12.5,
@@ -255,30 +510,26 @@ class _SearchScreenState extends State<SearchScreen> {
                       size: 16,
                       color: AppColors.textMuted,
                     ),
-                    onPressed: () {
-                      setState(() {
-                        _recentSearches.removeAt(index);
-                      });
-                    },
+                    onPressed: () =>
+                        setState(() => _recentSearches.removeAt(index)),
                     splashRadius: 16,
                   ),
-                  onTap: () {
-                    _searchController.text = search;
-                    _searchController.selection = TextSelection.fromPosition(
-                      TextPosition(offset: search.length),
-                    );
-                  },
+                  onTap: () => _triggerSearchWithTag(search),
                 );
               },
             ),
             const SizedBox(height: 24),
           ],
+
           Text(
-            "Browse Genres",
-            style: Theme.of(context).textTheme.titleMedium
+            'Explore Jamendo Genres',
+            style: Theme.of(context)
+                .textTheme
+                .titleMedium
                 ?.copyWith(fontWeight: FontWeight.bold, fontSize: 15),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
+
           GridView.count(
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
@@ -287,10 +538,12 @@ class _SearchScreenState extends State<SearchScreen> {
             mainAxisSpacing: 14,
             childAspectRatio: 1.6,
             children: [
-              _buildGenreCard("Pop", AppColors.getGradientForId(0)),
-              _buildGenreCard("Electronic", AppColors.getGradientForId(1)),
-              _buildGenreCard("Lofi & Chill", AppColors.getGradientForId(5)),
-              _buildGenreCard("Rock & Retro", AppColors.getGradientForId(7)),
+              _buildGenreCard('Rock', AppColors.getGradientForId(7)),
+              _buildGenreCard('Electronic', AppColors.getGradientForId(1)),
+              _buildGenreCard('Pop', AppColors.getGradientForId(0)),
+              _buildGenreCard('Chillout', AppColors.getGradientForId(5)),
+              _buildGenreCard('Acoustic', AppColors.getGradientForId(3)),
+              _buildGenreCard('Hip Hop', AppColors.getGradientForId(6)),
             ],
           ),
           const SizedBox(height: 140),
@@ -301,10 +554,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Widget _buildGenreCard(String title, List<Color> gradient) {
     return GestureDetector(
-      onTap: () {
-        // Set search query based on genre click
-        _searchController.text = title.split(' ')[0];
-      },
+      onTap: () => _triggerSearchWithTag(title),
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
@@ -315,7 +565,7 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
           boxShadow: [
             BoxShadow(
-              color: gradient[0].withOpacity(0.15),
+              color: gradient[0].withValues(alpha: 0.15),
               blurRadius: 8,
               offset: const Offset(0, 4),
             ),
@@ -342,7 +592,7 @@ class _SearchScreenState extends State<SearchScreen> {
               child: Icon(
                 Icons.music_note_rounded,
                 size: 56,
-                color: Colors.white.withOpacity(0.10),
+                color: Colors.white.withValues(alpha: 0.10),
               ),
             ),
           ],
