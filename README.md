@@ -1,103 +1,74 @@
-# Rachan 🎧
+# Harmoniq
 
-A modern Flutter-based music player focused on playing music stored locally on an Android device.
+A Flutter music player with native audio controls for local files and online YouTube audio.
 
-## Version
+## Listening
 
-v1.0.0 — Local Music Player
+1. Tap **Find your next song**, choose a mood, or open Search.
+2. Search for a song/artist, or paste a YouTube/YouTube Music link.
+3. Select a result. Harmoniq opens its own Now Playing screen with artwork, queue, seek, favorite, shuffle/repeat and play/pause controls.
 
-## Current Features
+There is no embedded video, hidden WebView, or external YouTube app handoff. The search result list becomes the queue. Online and local tracks use the same `just_audio` engine and Android background-media integration.
 
-- **Local Storage Access & Permissions**: Requests and handles standard storage access (supporting modern Android 13+ `READ_MEDIA_AUDIO` permission workflow).
-- **Local Audio Scanning**: Natively queries the Android `MediaStore` cursor via a custom Kotlin MethodChannel to retrieve real MP3 tracks.
-- **Audio Playback Engine**: Fully integrated with `just_audio` to play local media tracks with hardware decoding.
-- **Playback Controls**: Play, pause, resume, seek, next/previous queue skipping.
-- **Real-Time Duration & Progress**: Displays actual track durations and current playback positions dynamically.
-- **Glassmorphism Dark UI**: A sleek, modern dark-themed dashboard using premium glass-morphic visual styling.
-- **Interactive Mini Player**: Stays fully synchronized with active track changes and progress across all app tabs.
-- **Now Playing Screen**: Features a detailed view with spring-based album art animations, a queue drawer, and precise seeking controls.
-- **Search Screen**: Allows typing queries to search and filter local songs instantly.
-- **Favorites & Library**: Supports favoriting songs and adding them to custom user-created playlists dynamically.
+## How online playback works
 
-## Current Limitations
+- Search uses public metadata via `youtube_explode_dart` without a key on native platforms, or the official YouTube Data API when configured.
+- At playback time, the resolver requests an audio-only stream manifest using the library's standard API. MP4 audio is preferred where available, otherwise another audio-only stream is selected.
+- Resolved signed URLs are temporary. They are never persisted in songs/favorites or printed in logs; retry resolves a fresh URL.
+- Loading and playback errors are visible. Pause while loading is respected; skip/stop/dispose invalidate older requests so stale work cannot restart playback.
+- YouTube song IDs remain strings, separate from local numeric IDs, preventing queue/catalog/favorite collisions.
 
-- **Rachan v1.0.0** currently supports local music playback only.
-- Online music streaming is not implemented yet.
-- No Spotify, YouTube, or other commercial music catalog integration.
-- No user authentication or cloud sync.
-- The app currently focuses on music files available physically on the Android device.
+**This playback integration is unofficial.** It is not the YouTube Music API or a Premium integration. Streams may fail because of service changes, expired links, regional/age restrictions, throttling or authentication requirements. No user cookies, credentials, proxies, custom challenge solvers, or additional bypass mechanisms are configured. The third-party package has its own default request identities and retry behavior. No video fallback is used. Review provider terms and media rights before distributing or using online features commercially.
 
-## Tech Stack
+### Known playback blocker (2026-09-12)
 
-- **Framework**: [Flutter](https://flutter.dev) (Dart SDK `^3.13.2`)
-- **Native Android Binding**: Kotlin MethodChannel (`com.example.rachan/local_music`)
-- **Audio Engine**: [`just_audio`](https://pub.dev/packages/just_audio) for local resource decoding and playback control
-- **Permissions Handler**: Custom native activity request logic for `READ_MEDIA_AUDIO` / `READ_EXTERNAL_STORAGE`
+The reported Proximity track `SMs0GnYze34` currently fails audio delivery with HTTP 403. A manifest can resolve even when its media cannot be fetched. The MP4 library download produced zero bytes before the deadline. A WebM prefix request returned 206, but both a subsequent full request and a first full request from a fresh manifest returned 403 with zero bytes. Therefore neither format switching nor temporary-file buffering has been validated as a fix. The app now distinguishes provider denial when the Dart error payload includes an HTTP status, without exposing signed URLs. The installed just_audio Android plugin often logs HTTP 403 natively but forwards only `Source error` to Dart; those cases correctly remain generic rather than inventing a cause. Do not treat passing unit tests, a successful build, or a small prefix download as proof of working YouTube audio playback.
 
-## Installation
+## Run
 
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd rachan
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   flutter pub get
-   ```
-
-3. **Connect an Android device** with USB debugging enabled.
-
-4. **Run the app**:
-   ```bash
-   flutter run
-   ```
-
-## Permissions
-
-Rachan requests local storage permissions to scan and play audio files:
-* **Android 13+ (API 33+)**: Requests `android.permission.READ_MEDIA_AUDIO` for direct access to music libraries.
-* **Android 12 and below**: Requests `android.permission.READ_EXTERNAL_STORAGE` for legacy filesystem access.
-
-## Project Structure
-
-The primary directory layout is organized as follows:
-```text
-rachan/
-├── android/            # Native Android Gradle configuration and Kotlin plugins
-│   └── app/src/main/kotlin/com/example/rachan/MainActivity.kt # Local music cursor scanning
-├── lib/
-│   ├── data/           # Fallback mock/sample data
-│   ├── models/         # Data structures (Song, Playlist)
-│   ├── screens/        # Primary layout layers (HomeScreen, SearchScreen, LocalScreen, NowPlayingScreen)
-│   ├── services/       # Audio player services (AudioService backed by just_audio)
-│   ├── theme/          # App coloring and visual configuration
-│   ├── widgets/        # Component widgets (MiniPlayer, AlbumArt, BottomNav, GlassCard)
-│   └── main.dart       # Main entry point and screen routing shell
-├── pubspec.yaml        # Flutter dependency manager
-└── README.md           # Project documentation
+```sh
+flutter pub get
+flutter run
 ```
 
-## Future Roadmap
+Optional official **metadata** API mode (does not grant official audio-stream access):
 
-### v1.1
-- Improve local library organization (artist and album groupings)
-- Custom playlist improvements (sorting and cover customisation)
-- Better queue management (re-orderable lists)
+```sh
+flutter run --dart-define=YOUTUBE_API_KEY=YOUR_RESTRICTED_KEY
+flutter build apk --release --dart-define=YOUTUBE_API_KEY=YOUR_RESTRICTED_KEY
+```
 
-### v2.0
-- Online music discovery
-- Public/open music catalog integration
-- Online search and streaming where legally supported
+Enable YouTube Data API v3 in Google Cloud. Never commit a real key. Client `dart-define` values are bundled and are not secrets; apply suitable application/API restrictions, quota limits, or use an authenticated backend for production credential protection.
 
-### Future
-- Cloud sync
-- User accounts
-- Enhanced recommendation systems
-- Additional personalization
+## Platforms
 
----
+- **Android:** primary target; local MediaStore scanning, native online audio and media notifications.
+- **Web:** UI preview and optional official metadata search; online audio resolution is explicitly unsupported due to browser/network restrictions. No iframe or public CORS proxy fallback.
+- **iOS/macOS:** source-resolution code is native-compatible but platform audio/signing/network configuration is unverified here.
+- **Windows/Linux:** metadata resolution can run, but this project does not include an appropriate `just_audio` desktop backend. A successful source request is not native playback support.
 
-### Disclaimer
-Rachan is an independent local music player and is not affiliated with, endorsed by, or in any way associated with Spotify or other streaming companies.
+Windows Flutter plugin development may require symlink support. The project does not change machine settings automatically.
+
+## Existing library
+
+Local scanning remains off the Android UI thread, lists remain lazy/cached, and progress updates are isolated from full-screen rebuilds. Saved favorites from the removed Jamendo source remain unavailable legacy metadata, not silently deleted or converted into unrelated YouTube tracks.
+
+## Checks
+
+```sh
+flutter analyze
+flutter test
+flutter build apk --release
+flutter build web --release
+```
+
+Tests cover source-aware identity/serialization, temporary URL exclusion, resolver failure/races, loading/pause/stop/retry, queues, local scanning, search routing, responsive layouts and reduced motion. Tests use fake transports/players; distinguish these from live device playback verification.
+
+## Main components
+
+- `youtube_catalog.dart`: metadata discovery and bounded caching.
+- `youtube_audio_resolver.dart`: native/stub audio-resolution boundary.
+- `audio_service.dart`: shared native playback, queue and library state.
+- `now_playing_screen.dart` / `mini_player.dart`: native audio UI.
+
+Harmoniq is independent and is not affiliated with or endorsed by YouTube or Google.

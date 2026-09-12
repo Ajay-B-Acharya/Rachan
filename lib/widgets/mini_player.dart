@@ -1,14 +1,20 @@
 import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
 import '../theme/app_colors.dart';
 import 'album_art.dart';
 import 'glass_card.dart';
+import 'motion.dart';
 
 class MiniPlayer extends StatelessWidget {
   final Song song;
   final bool isPlaying;
+  final bool isLoading;
+  final String? playbackError;
+  final VoidCallback? onRetryTap;
+  final bool? wantsToPlay;
   final VoidCallback onTap;
   final Future<void> Function() onPlayPauseTap;
   final Future<void> Function() onNextTap;
@@ -20,6 +26,10 @@ class MiniPlayer extends StatelessWidget {
     super.key,
     required this.song,
     required this.isPlaying,
+    this.isLoading = false,
+    this.playbackError,
+    this.onRetryTap,
+    this.wantsToPlay,
     required this.onTap,
     required this.onPlayPauseTap,
     required this.onNextTap,
@@ -30,6 +40,7 @@ class MiniPlayer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final showPause = isLoading ? (wantsToPlay ?? isPlaying) : isPlaying;
     return RepaintBoundary(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -47,7 +58,7 @@ class MiniPlayer extends StatelessWidget {
             borderRadius: 18,
             blurSigma: 0, // no BackdropFilter — sits over scrolling content
             padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
-            color: const Color(0xFF12121E),
+            color: const Color(0xFF25232C),
             borderColor: isPlaying
                 ? AppColors.accent.withValues(alpha: 0.28)
                 : Colors.white.withValues(alpha: 0.12),
@@ -58,12 +69,12 @@ class MiniPlayer extends StatelessWidget {
                   children: [
                     // Thumbnail with Hero animation
                     Hero(
-                      tag: 'album-art-${song.id}',
+                      tag: 'album-art-${song.identity}',
                       child: AlbumArt(
                         gradientId: song.gradientId,
                         size: 44,
                         borderRadius: 10,
-                        showShadow: isPlaying,
+                        showShadow: false,
                         imageUrl: song.albumArtUrl,
                       ),
                     ),
@@ -88,7 +99,9 @@ class MiniPlayer extends StatelessWidget {
                                       ),
                                 ),
                               ),
-                              if (isPlaying) ...[
+                              if (isPlaying &&
+                                  !isLoading &&
+                                  playbackError == null) ...[
                                 const SizedBox(width: 8),
                                 const MiniEqualizerBars(isPlaying: true),
                                 const SizedBox(width: 4),
@@ -111,18 +124,20 @@ class MiniPlayer extends StatelessWidget {
                     ),
                     // Play/Pause Action with micro-scale feedback
                     IconButton(
+                      tooltip: showPause ? 'Pause' : 'Play',
+                      style: IconButton.styleFrom(
+                        backgroundColor: AppColors.accent,
+                      ),
                       icon: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 200),
-                        transitionBuilder: (child, anim) => ScaleTransition(
-                          scale: anim,
-                          child: child,
-                        ),
+                        duration: motionDuration(context, 180),
+                        transitionBuilder: (child, anim) =>
+                            ScaleTransition(scale: anim, child: child),
                         child: Icon(
-                          isPlaying
+                          showPause
                               ? Icons.pause_rounded
                               : Icons.play_arrow_rounded,
-                          key: ValueKey(isPlaying),
-                          color: Colors.white,
+                          key: ValueKey(showPause),
+                          color: AppColors.background,
                           size: 28,
                         ),
                       ),
@@ -131,6 +146,7 @@ class MiniPlayer extends StatelessWidget {
                     ),
                     // Skip Next Action
                     IconButton(
+                      tooltip: 'Next track',
                       icon: const Icon(
                         Icons.skip_next_rounded,
                         color: Colors.white,
@@ -153,6 +169,41 @@ class MiniPlayer extends StatelessWidget {
                       ),
                   ],
                 ),
+                if (isLoading || playbackError != null)
+                  Semantics(
+                    liveRegion: true,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            playbackError ??
+                                (showPause
+                                    ? 'Loading audio…'
+                                    : 'Loading audio… · Paused'),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.textSecondary,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ),
+                        if (playbackError != null)
+                          IconButton(
+                            tooltip: onRetryTap != null
+                                ? 'Retry playback'
+                                : 'Open playback details',
+                            onPressed: isLoading ? null : (onRetryTap ?? onTap),
+                            icon: Icon(
+                              onRetryTap != null
+                                  ? Icons.refresh_rounded
+                                  : Icons.error_outline_rounded,
+                            ),
+                            color: AppColors.accentLight,
+                          ),
+                      ],
+                    ),
+                  ),
                 const SizedBox(height: 7),
                 // Isolated Progress Bar - listens only to positionNotifier (zero rebuilds for the parent)
                 Padding(
@@ -167,7 +218,12 @@ class MiniPlayer extends StatelessWidget {
                             ? (pos.inMilliseconds / totalMs).clamp(0.0, 1.0)
                             : 0.0;
                         return LinearProgressIndicator(
-                          value: progress.isNaN ? 0.0 : progress,
+                          value: isLoading
+                              ? null
+                              : (progress.isNaN ? 0.0 : progress),
+                          semanticsLabel: isLoading
+                              ? 'Loading audio'
+                              : 'Playback progress',
                           backgroundColor: Colors.white.withValues(alpha: 0.08),
                           valueColor: const AlwaysStoppedAnimation<Color>(
                             AppColors.accent,
@@ -204,6 +260,7 @@ class MiniEqualizerBars extends StatefulWidget {
 class _MiniEqualizerBarsState extends State<MiniEqualizerBars>
     with SingleTickerProviderStateMixin {
   late AnimationController _controller;
+  bool _reduceMotion = false;
 
   @override
   void initState() {
@@ -212,19 +269,27 @@ class _MiniEqualizerBarsState extends State<MiniEqualizerBars>
       vsync: this,
       duration: const Duration(milliseconds: 650),
     );
-    if (widget.isPlaying) {
-      _controller.repeat(reverse: true);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _reduceMotion = MediaQuery.disableAnimationsOf(context);
+    _syncAnimation();
+  }
+
+  void _syncAnimation() {
+    if (widget.isPlaying && !_reduceMotion) {
+      if (!_controller.isAnimating) _controller.repeat(reverse: true);
+    } else {
+      _controller.stop();
     }
   }
 
   @override
   void didUpdateWidget(MiniEqualizerBars oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.isPlaying && !_controller.isAnimating) {
-      _controller.repeat(reverse: true);
-    } else if (!widget.isPlaying && _controller.isAnimating) {
-      _controller.stop();
-    }
+    _syncAnimation();
   }
 
   @override
@@ -243,8 +308,9 @@ class _MiniEqualizerBarsState extends State<MiniEqualizerBars>
           crossAxisAlignment: CrossAxisAlignment.end,
           children: List.generate(3, (i) {
             final t = (_controller.value + (i * 0.35)) % 1.0;
-            final double height =
-                widget.isPlaying ? 4.0 + 8.0 * (0.3 + 0.7 * sin(t * pi).abs()) : 4.0;
+            final double height = widget.isPlaying && !_reduceMotion
+                ? 4.0 + 8.0 * (0.3 + 0.7 * sin(t * pi).abs())
+                : 4.0;
             return Container(
               width: 2.2,
               height: height,

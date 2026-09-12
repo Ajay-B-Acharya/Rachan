@@ -53,7 +53,10 @@ class _LocalScreenState extends State<LocalScreen> {
     try {
       final bool granted =
           await _platform.invokeMethod<bool>('checkPermission') ?? false;
-      if (granted && mounted) {
+      if (granted &&
+          mounted &&
+          widget.audioService.localSongs.isEmpty &&
+          !widget.audioService.isScanning) {
         await widget.onScanTap();
       }
     } catch (e) {
@@ -64,15 +67,8 @@ class _LocalScreenState extends State<LocalScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF0F1A1C), AppColors.background],
-            stops: [0.0, 0.45],
-          ),
-        ),
+      body: Material(
+        color: AppColors.background,
         child: SafeArea(
           bottom: false,
           child: Padding(
@@ -96,9 +92,7 @@ class _LocalScreenState extends State<LocalScreen> {
                           children: [
                             Text(
                               'Local Music',
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .headlineMedium
+                              style: Theme.of(context).textTheme.headlineMedium
                                   ?.copyWith(
                                     fontWeight: FontWeight.w800,
                                     letterSpacing: -0.6,
@@ -106,8 +100,11 @@ class _LocalScreenState extends State<LocalScreen> {
                             ),
                             if (!isScanning)
                               IconButton(
-                                icon: const Icon(Icons.refresh_rounded,
-                                    color: Colors.white, size: 24),
+                                icon: const Icon(
+                                  Icons.refresh_rounded,
+                                  color: Colors.white,
+                                  size: 24,
+                                ),
                                 onPressed: widget.onScanTap,
                                 splashRadius: 24,
                               ),
@@ -164,80 +161,85 @@ class _LocalScreenState extends State<LocalScreen> {
   }) {
     if (isScanning) {
       return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const CircularProgressIndicator(
-              valueColor:
-                  AlwaysStoppedAnimation<Color>(AppColors.accent),
-              strokeWidth: 3,
-            ),
-            const SizedBox(height: 20),
-            const Text(
-              'Scanning device for audio files...',
-              style: TextStyle(
-                color: AppColors.textSecondary,
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(AppColors.accent),
+                strokeWidth: 3,
               ),
-            ),
-            const SizedBox(height: 100),
-          ],
+              const SizedBox(height: 20),
+              const Text(
+                'Scanning device for audio files...',
+                style: TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 100),
+            ],
+          ),
         ),
       );
     }
 
     if (localSongs.isEmpty) {
       return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.phone_android_rounded,
-              size: 56,
-              color: AppColors.textMuted.withValues(alpha: 0.4),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'No local songs found',
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  color: AppColors.textSecondary, fontSize: 15),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: Text(
-                'Harmoniq needs storage access to list audio files on your device.',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: AppColors.textMuted,
-                  fontSize: 12,
-                  height: 1.4,
-                ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.phone_android_rounded,
+                size: 56,
+                color: AppColors.textMuted.withValues(alpha: 0.4),
               ),
-            ),
-            const SizedBox(height: 24),
-            GestureDetector(
-              onTap: widget.onScanTap,
-              child: GlassCard(
-                borderRadius: 12,
-                blurSigma: 6,
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 22, vertical: 12),
-                color: AppColors.accent.withValues(alpha: 0.12),
-                borderColor: AppColors.accent.withValues(alpha: 0.25),
-                child: const Text(
-                  'Scan Storage / Grant Access',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13,
+              const SizedBox(height: 16),
+              Text(
+                'No local songs found',
+                style: Theme.of(context).textTheme.titleLarge
+                    ?.copyWith(color: AppColors.textSecondary, fontSize: 15),
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Text(
+                  'Scan your device for music. Allow audio access when prompted.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 12,
+                    height: 1.4,
                   ),
                 ),
               ),
-            ),
-            const SizedBox(height: 100),
-          ],
+              const SizedBox(height: 24),
+              GestureDetector(
+                onTap: widget.onScanTap,
+                child: GlassCard(
+                  borderRadius: 12,
+                  blurSigma: 6,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 22,
+                    vertical: 12,
+                  ),
+                  color: AppColors.accent.withValues(alpha: 0.12),
+                  borderColor: AppColors.accent.withValues(alpha: 0.25),
+                  child: const Text(
+                    'Scan Storage / Grant Access',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 100),
+            ],
+          ),
         ),
       );
     }
@@ -250,7 +252,7 @@ class _LocalScreenState extends State<LocalScreen> {
           return const SizedBox(height: 130);
         }
         final song = localSongs[index];
-        final isActive = currentSong?.id == song.id;
+        final isActive = currentSong?.identity == song.identity;
         return SongTile(
           song: song,
           isActive: isActive,

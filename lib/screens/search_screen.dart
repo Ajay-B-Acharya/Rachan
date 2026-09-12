@@ -1,603 +1,481 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
+import '../models/youtube_video.dart';
 import '../services/audio_service.dart';
-import '../services/jamendo_service.dart';
+import '../services/youtube_links.dart';
+import '../services/youtube_catalog.dart';
 import '../theme/app_colors.dart';
-import '../widgets/glass_card.dart';
+import '../widgets/motion.dart';
 import '../widgets/song_tile.dart';
+import '../widgets/youtube_card.dart';
 
 enum SearchFilter { all, local, online }
 
 class SearchScreen extends StatefulWidget {
   final AudioService audioService;
-  final Function(Song) onSongTap;
-  final Function(Song) onFavoriteTap;
+  final ValueChanged<Song> onSongTap;
+  final ValueChanged<Song> onFavoriteTap;
+  final Future<List<YoutubeVideo>> Function(String)? searchVideos;
+  final bool? youtubeConfigured;
+  final ValueChanged<YoutubeVideo>? onVideoTap;
+  final void Function(YoutubeVideo, List<YoutubeVideo>)? onVideoQueueTap;
 
   const SearchScreen({
     super.key,
     required this.audioService,
     required this.onSongTap,
     required this.onFavoriteTap,
+    this.searchVideos,
+    this.youtubeConfigured,
+    this.onVideoTap,
+    this.onVideoQueueTap,
   });
 
   @override
-  State<SearchScreen> createState() => _SearchScreenState();
+  State<SearchScreen> createState() => SearchScreenState();
 }
 
-class _SearchScreenState extends State<SearchScreen> {
-  final TextEditingController _searchController = TextEditingController();
-  final JamendoService _jamendoService = JamendoService.instance;
-
-  SearchFilter _selectedFilter = SearchFilter.all;
-
-  List<Song> _localResults = [];
-  List<Song> _onlineResults = [];
-
-  bool _isSearching = false;
-  bool _isOnlineLoading = false;
-  String? _onlineError;
-
-  Timer? _debounceTimer;
-
-  final List<String> _recentSearches = [
-    'Rock',
-    'Electronic',
-    'Chillout',
-    'Acoustic',
-  ];
+class SearchScreenState extends State<SearchScreen> {
+  final _controller = TextEditingController();
+  SearchFilter _filter = SearchFilter.all;
+  List<Song> _local = [];
+  List<YoutubeVideo> _videos = [];
+  String _query = '';
+  String? _submitted;
+  String? _error;
+  bool _loading = false;
+  int _generation = 0;
+  int _localRevision = -1;
+  String? _localQuery;
+  final List<String> _recent = [];
+  bool get _configured =>
+      widget.youtubeConfigured ??
+      (widget.searchVideos != null || YoutubeCatalog.instance.isAvailable);
 
   @override
   void initState() {
     super.initState();
-    _searchController.addListener(_onSearchChanged);
+    _controller.addListener(_changed);
   }
 
   @override
   void dispose() {
-    _debounceTimer?.cancel();
-    _searchController.removeListener(_onSearchChanged);
-    _searchController.dispose();
+    _controller.dispose();
     super.dispose();
   }
 
-  void _onSearchChanged() {
-    final query = _searchController.text.trim();
-    if (query.isEmpty) {
-      _debounceTimer?.cancel();
-      setState(() {
-        _localResults = [];
-        _onlineResults = [];
-        _isSearching = false;
-        _isOnlineLoading = false;
-        _onlineError = null;
-      });
+  void setQuery(String query) {
+    _controller.text = query;
+    _controller.selection = TextSelection.collapsed(offset: query.length);
+  }
+
+  void _changed() {
+    final query = _controller.text.trim();
+    if (query == _query) return;
+    setState(() {
+      _query = query;
+      _generation++;
+      _loading = false;
+      _videos = [];
+      _error = null;
+      _submitted = null;
+      _refreshLocal();
+    });
+  }
+
+  void _refreshLocal() {
+    if (_localRevision == widget.audioService.localSongsRevision &&
+        _localQuery == _query) {
       return;
     }
-
-    final lowerQuery = query.toLowerCase();
-
-    // Instant local results filter
-    final localMatches = widget.audioService.localSongs.where((song) {
-      return song.title.toLowerCase().contains(lowerQuery) ||
-          song.artist.toLowerCase().contains(lowerQuery) ||
-          song.album.toLowerCase().contains(lowerQuery);
-    }).toList();
-
-    setState(() {
-      _isSearching = true;
-      _localResults = localMatches;
-      _isOnlineLoading = true;
-      _onlineError = null;
-    });
-
-    // Debounce online Jamendo search requests (450ms)
-    _debounceTimer?.cancel();
-    _debounceTimer = Timer(const Duration(milliseconds: 450), () {
-      _performOnlineSearch(query);
-    });
+    _localRevision = widget.audioService.localSongsRevision;
+    _localQuery = _query;
+    final lower = _query.toLowerCase();
+    _local = lower.isEmpty
+        ? []
+        : widget.audioService.localSongs
+              .where(
+                (song) =>
+                    song.title.toLowerCase().contains(lower) ||
+                    song.artist.toLowerCase().contains(lower) ||
+                    song.album.toLowerCase().contains(lower),
+              )
+              .toList();
   }
 
-  Future<void> _performOnlineSearch(String query) async {
-    if (!mounted) return;
+  Future<void> _submit() async {
+    if (_query.isEmpty || _filter == SearchFilter.local) return;
+    final id = YoutubeLinks.videoIdFromInput(_query);
+    if (id != null) {
+      widget.onVideoTap?.call(
+        YoutubeVideo(
+          id: id,
+          title: 'YouTube track',
+          artist: 'YouTube',
+          thumbnailUrl: 'https://i.ytimg.com/vi/$id/hqdefault.jpg',
+        ),
+      );
+      return;
+    }
+    if (!_configured) return;
+    final query = _query;
+    final generation = ++_generation;
+    setState(() {
+      _loading = true;
+      _error = null;
+      _submitted = query;
+    });
     try {
-      final results = await _jamendoService.searchTracks(query, limit: 30);
-      if (!mounted) return;
-
-      widget.audioService.registerSongs(results);
-
+      final result =
+          await (widget.searchVideos?.call(query) ??
+              YoutubeCatalog.instance.search(query));
+      if (!mounted || generation != _generation) return;
       setState(() {
-        _onlineResults = results;
-        _isOnlineLoading = false;
-        _onlineError = null;
+        _videos = result;
+        _loading = false;
+        _recent.remove(query);
+        _recent.insert(0, query);
+        if (_recent.length > 6) _recent.removeLast();
       });
-
-      // Save to recent searches if found
-      if (results.isNotEmpty && !_recentSearches.contains(query)) {
-        _recentSearches.insert(0, query);
-        if (_recentSearches.length > 8) _recentSearches.removeLast();
-      }
-    } catch (e) {
-      if (!mounted) return;
+    } catch (error) {
+      if (!mounted || generation != _generation) return;
       setState(() {
-        _isOnlineLoading = false;
-        _onlineError = 'Network error loading online results';
+        _loading = false;
+        _error = error is YoutubeSourceException
+            ? error.message
+            : 'Could not load YouTube results. Please try again.';
       });
     }
   }
 
-  void _triggerSearchWithTag(String tag) {
-    _searchController.text = tag;
-    _searchController.selection = TextSelection.fromPosition(
-      TextPosition(offset: tag.length),
-    );
+  void _playResult(YoutubeVideo video) {
+    if (widget.onVideoQueueTap != null) {
+      widget.onVideoQueueTap!(video, _videos);
+    } else {
+      widget.onVideoTap?.call(video);
+    }
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF0C1420), AppColors.background],
-            stops: [0.0, 0.45],
-          ),
-        ),
-        child: SafeArea(
-          bottom: false,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 24),
-                Text(
-                  'Search',
-                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -0.6,
-                      ),
-                ),
-                const SizedBox(height: 18),
-
-                // ── Search Input Field ────────────────────────────────────────
-                GlassCard(
-                  borderRadius: 14,
-                  blurSigma: 0,
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  color: Colors.white.withValues(alpha: 0.05),
-                  borderColor: Colors.white.withValues(alpha: 0.12),
-                  child: TextField(
-                    controller: _searchController,
-                    style: const TextStyle(color: Colors.white, fontSize: 15),
-                    decoration: InputDecoration(
-                      hintText: 'Search songs, artists, Jamendo...',
-                      hintStyle: const TextStyle(
-                        color: AppColors.textMuted,
-                        fontSize: 14,
-                      ),
-                      prefixIcon: const Icon(
-                        Icons.search_rounded,
-                        color: AppColors.textSecondary,
-                        size: 22,
-                      ),
-                      suffixIcon: _searchController.text.isNotEmpty
-                          ? IconButton(
-                              icon: const Icon(
-                                Icons.clear_rounded,
-                                color: Colors.white,
-                                size: 20,
-                              ),
-                              onPressed: _searchController.clear,
-                            )
-                          : null,
-                      border: InputBorder.none,
-                      contentPadding:
-                          const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 14),
-
-                // ── Filter Chips (ALL, LOCAL, ONLINE) ─────────────────────────
-                if (_isSearching) _buildFilterTabs(),
-
-                const SizedBox(height: 12),
-
-                // ── Body (Search Results or Default Categories) ───────────────
-                Expanded(
-                  child: _isSearching
-                      ? _buildSearchResultsView()
-                      : _buildDefaultView(),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFilterTabs() {
-    return SizedBox(
-      height: 34,
-      child: Row(
-        children: [
-          _buildFilterChip('ALL', SearchFilter.all),
-          const SizedBox(width: 8),
-          _buildFilterChip('LOCAL', SearchFilter.local),
-          const SizedBox(width: 8),
-          _buildFilterChip('ONLINE (JAMENDO)', SearchFilter.online),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildFilterChip(String label, SearchFilter filter) {
-    final isSelected = _selectedFilter == filter;
-    return GestureDetector(
-      onTap: () => setState(() => _selectedFilter = filter),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? AppColors.accent
-              : Colors.white.withValues(alpha: 0.06),
-          borderRadius: BorderRadius.circular(17),
-          border: Border.all(
-            color: isSelected
-                ? Colors.transparent
-                : Colors.white.withValues(alpha: 0.1),
-            width: 1,
-          ),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: isSelected ? Colors.white : AppColors.textSecondary,
-            fontSize: 11,
-            fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-            letterSpacing: 0.4,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSearchResultsView() {
-    return ListenableBuilder(
-      listenable: widget.audioService,
-      builder: (context, _) {
-        final currentSong = widget.audioService.currentSong;
-        final isPlaying = widget.audioService.isPlaying;
-
-        final hasLocal = _localResults.isNotEmpty;
-        final hasOnline = _onlineResults.isNotEmpty;
-
-        if (!hasLocal && !hasOnline && !_isOnlineLoading) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.search_off_rounded,
-                  size: 56,
-                  color: AppColors.textMuted.withValues(alpha: 0.4),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'No results found',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        color: AppColors.textSecondary,
-                        fontSize: 16,
-                      ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Try searching for a genre or different keyword',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: AppColors.textMuted,
-                        fontSize: 12.5,
-                      ),
-                ),
-                const SizedBox(height: 100),
-              ],
-            ),
-          );
-        }
-
-        return ListView(
-          physics: const BouncingScrollPhysics(),
-          padding: EdgeInsets.zero,
+  Widget build(BuildContext context) => Scaffold(
+    body: SafeArea(
+      bottom: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── LOCAL SECTION ─────────────────────────────────────────────────
-            if ((_selectedFilter == SearchFilter.all ||
-                    _selectedFilter == SearchFilter.local) &&
-                hasLocal) ...[
-              _buildSectionTitle(
-                'Local Device Tracks',
-                _localResults.length,
-                Colors.amberAccent,
+            EnterTransition(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Chase that sound.',
+                    style: Theme.of(context).textTheme.headlineMedium,
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'YouTube discoveries. Your offline favorites.',
+                    style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+                  ),
+                ],
               ),
-              const SizedBox(height: 8),
-              ..._localResults.map((song) {
-                final isActive = currentSong?.id == song.id;
-                return SongTile(
-                  song: song,
-                  isActive: isActive,
-                  isPlaying: isActive && isPlaying,
-                  onTap: () => widget.onSongTap(song),
-                  onFavoriteTap: () => widget.onFavoriteTap(song),
-                );
-              }),
-              const SizedBox(height: 20),
-            ],
-
-            // ── ONLINE JAMENDO SECTION ────────────────────────────────────────
-            if (_selectedFilter == SearchFilter.all ||
-                _selectedFilter == SearchFilter.online) ...[
-              _buildSectionTitle(
-                'Jamendo Online Tracks',
-                _onlineResults.length,
-                AppColors.accentLight,
+            ),
+            const SizedBox(height: 22),
+            TextField(
+              controller: _controller,
+              textInputAction: TextInputAction.search,
+              onSubmitted: (_) => _submit(),
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Songs, artists, or a YouTube link',
+                hintStyle: const TextStyle(
+                  fontSize: 13,
+                  color: AppColors.textMuted,
+                ),
+                prefixIcon: const Icon(Icons.search_rounded, size: 21),
+                suffixIcon: _query.isNotEmpty
+                    ? IconButton(
+                        tooltip: 'Clear search',
+                        onPressed: _controller.clear,
+                        icon: const Icon(Icons.close_rounded, size: 19),
+                      )
+                    : null,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 18,
+                ),
               ),
-              const SizedBox(height: 8),
-
-              if (_isOnlineLoading)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 24),
-                  child: Center(
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      valueColor:
-                          AlwaysStoppedAnimation<Color>(AppColors.accent),
-                    ),
-                  ),
-                )
-              else if (_onlineError != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  child: Center(
-                    child: Column(
-                      children: [
-                        Text(
-                          _onlineError!,
-                          style: const TextStyle(
-                            color: AppColors.textSecondary,
-                            fontSize: 12.5,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        TextButton(
-                          onPressed: () => _performOnlineSearch(
-                            _searchController.text.trim(),
-                          ),
-                          child: const Text('Retry Online Search'),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              else if (!hasOnline)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 20),
-                  child: Center(
-                    child: Text(
-                      'No online Jamendo tracks found for this query.',
-                      style: TextStyle(
-                        color: AppColors.textMuted,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                )
-              else
-                ..._onlineResults.map((song) {
-                  final isActive = currentSong?.id == song.id;
-                  return SongTile(
-                    song: song,
-                    isActive: isActive,
-                    isPlaying: isActive && isPlaying,
-                    onTap: () => widget.onSongTap(song),
-                    onFavoriteTap: () => widget.onFavoriteTap(song),
-                  );
-                }),
-            ],
-
-            const SizedBox(height: 130),
+            ),
+            const SizedBox(height: 16),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _chip('All', SearchFilter.all),
+                  const SizedBox(width: 8),
+                  _chip('Local', SearchFilter.local),
+                  const SizedBox(width: 8),
+                  _chip('YouTube', SearchFilter.online),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: ListenableBuilder(
+                listenable: widget.audioService,
+                builder: (context, _) {
+                  _refreshLocal();
+                  return _query.isEmpty ? _empty() : _results();
+                },
+              ),
+            ),
           ],
-        );
-      },
-    );
-  }
+        ),
+      ),
+    ),
+  );
 
-  Widget _buildSectionTitle(String title, int count, Color accentColor) {
-    return Row(
-      children: [
-        Text(
-          title,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 14.5,
+  Widget _chip(String text, SearchFilter filter) => ChoiceChip(
+    label: Text(text),
+    selected: _filter == filter,
+    showCheckmark: false,
+    selectedColor: AppColors.accent,
+    labelStyle: TextStyle(
+      color: _filter == filter ? AppColors.background : AppColors.textSecondary,
+      fontWeight: FontWeight.w600,
+    ),
+    onSelected: (_) => setState(() {
+      _filter = filter;
+      if (filter == SearchFilter.local) {
+        _generation++;
+        _loading = false;
+      }
+    }),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+    side: BorderSide.none,
+  );
+
+  Widget _empty() => ListView(
+    children: [
+      _youtubeBridge(),
+      const SizedBox(height: 28),
+      if (_recent.isNotEmpty) ...[
+        const Text(
+          'Recent searches',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
+        ..._recent.map(
+          (query) => ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.history_rounded, size: 18),
+            title: Text(query),
+            trailing: const Icon(Icons.north_west_rounded, size: 17),
+            onTap: () => setQuery(query),
           ),
         ),
-        const SizedBox(width: 8),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-          decoration: BoxDecoration(
-            color: accentColor.withValues(alpha: 0.15),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: accentColor.withValues(alpha: 0.3),
-              width: 0.8,
+        const SizedBox(height: 20),
+      ],
+      const Text(
+        'Start somewhere good.',
+        style: TextStyle(fontSize: 19, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 14),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children:
+            [
+                  'Indie discoveries',
+                  'Live sessions',
+                  'Lo-fi beats',
+                  'Hindi hits',
+                  'Jazz after dark',
+                  'Electronic',
+                ]
+                .map(
+                  (tag) => ActionChip(
+                    label: Text(tag),
+                    onPressed: () => setQuery(tag),
+                    side: const BorderSide(color: Colors.white12),
+                    backgroundColor: Colors.transparent,
+                  ),
+                )
+                .toList(),
+      ),
+      const SizedBox(height: 32),
+      const Text(
+        'Have a link? Paste a YouTube or YouTube Music URL above to load its audio in Harmoniq.',
+        style: TextStyle(color: AppColors.textMuted, fontSize: 12, height: 1.5),
+      ),
+      const SizedBox(height: 28),
+    ],
+  );
+
+  Widget _results() {
+    final showLocal = _filter != SearchFilter.online;
+    final showOnline = _filter != SearchFilter.local;
+    final id = YoutubeLinks.videoIdFromInput(_query);
+    return CustomScrollView(
+      slivers: [
+        if (showOnline) ...[
+          if (!_configured && id == null)
+            SliverToBoxAdapter(child: _youtubeBridge()),
+          if (id != null)
+            SliverToBoxAdapter(
+              child: FilledButton.icon(
+                onPressed: _submit,
+                icon: const Icon(Icons.play_circle_outline_rounded),
+                label: const Text('Play this song'),
+              ),
+            )
+          else if (_configured)
+            SliverToBoxAdapter(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton.icon(
+                  onPressed: _loading ? null : _submit,
+                  icon: const Icon(Icons.search_rounded, size: 18),
+                  label: Text(
+                    _error != null ? 'Retry YouTube search' : 'Search YouTube',
+                  ),
+                ),
+              ),
+            ),
+          const SliverToBoxAdapter(child: SizedBox(height: 18)),
+          if (_loading)
+            const SliverToBoxAdapter(
+              child: Center(
+                child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            ),
+          if (_error != null)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 18),
+                child: Text(
+                  _error!,
+                  style: const TextStyle(color: AppColors.textSecondary),
+                ),
+              ),
+            ),
+          if (_videos.isNotEmpty)
+            SliverList.builder(
+              itemCount: _videos.length,
+              itemBuilder: (context, index) => Padding(
+                padding: const EdgeInsets.only(bottom: 24),
+                child: YoutubeCard(
+                  video: _videos[index],
+                  onTap: () => _playResult(_videos[index]),
+                ),
+              ),
+            ),
+          if (!_loading &&
+              _error == null &&
+              _submitted == _query &&
+              _videos.isEmpty)
+            const SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.only(bottom: 20),
+                child: Text(
+                  'No YouTube tracks found. Try a different artist or song.',
+                  style: TextStyle(color: AppColors.textSecondary),
+                ),
+              ),
+            ),
+        ],
+        if (showLocal) ...[
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                'On your device · ${_local.length}',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 16,
+                ),
+              ),
             ),
           ),
-          child: Text(
-            count.toString(),
-            style: TextStyle(
-              color: accentColor,
-              fontSize: 10,
-              fontWeight: FontWeight.bold,
+          if (_local.isEmpty)
+            const SliverToBoxAdapter(
+              child: Text(
+                'No local results found',
+                style: TextStyle(color: AppColors.textMuted),
+              ),
             ),
+          SliverList.builder(
+            itemCount: _local.length,
+            itemBuilder: (context, index) {
+              final song = _local[index].copyWith(
+                isFavorite: widget.audioService.isSongFavorite(_local[index]),
+              );
+              final active = widget.audioService.currentSong == song;
+              return SongTile(
+                song: song,
+                isActive: active,
+                isPlaying: active && widget.audioService.isPlaying,
+                onTap: () => widget.onSongTap(song),
+                onFavoriteTap: () => widget.onFavoriteTap(song),
+              );
+            },
           ),
-        ),
+        ],
+        const SliverToBoxAdapter(child: SizedBox(height: 32)),
       ],
     );
   }
 
-  Widget _buildDefaultView() {
-    return SingleChildScrollView(
-      physics: const BouncingScrollPhysics(),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (_recentSearches.isNotEmpty) ...[
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Recent Searches',
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleMedium
-                      ?.copyWith(fontWeight: FontWeight.bold, fontSize: 15),
-                ),
-                TextButton(
-                  onPressed: () => setState(() => _recentSearches.clear()),
-                  child: const Text(
-                    'Clear All',
-                    style: TextStyle(
-                      color: AppColors.accent,
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            ListView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: _recentSearches.length,
-              itemBuilder: (context, index) {
-                final search = _recentSearches[index];
-                return ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  leading: const Icon(
-                    Icons.history_rounded,
-                    color: AppColors.textMuted,
-                    size: 18,
-                  ),
-                  title: Text(
-                    search,
-                    style: const TextStyle(
-                      fontSize: 13.5,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                  trailing: IconButton(
-                    icon: const Icon(
-                      Icons.close_rounded,
-                      size: 16,
-                      color: AppColors.textMuted,
-                    ),
-                    onPressed: () =>
-                        setState(() => _recentSearches.removeAt(index)),
-                    splashRadius: 16,
-                  ),
-                  onTap: () => _triggerSearchWithTag(search),
-                );
-              },
-            ),
-            const SizedBox(height: 24),
-          ],
-
-          Text(
-            'Explore Jamendo Genres',
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold, fontSize: 15),
-          ),
-          const SizedBox(height: 14),
-
-          GridView.count(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisCount: 2,
-            crossAxisSpacing: 14,
-            mainAxisSpacing: 14,
-            childAspectRatio: 1.6,
-            children: [
-              _buildGenreCard('Rock', AppColors.getGradientForId(7)),
-              _buildGenreCard('Electronic', AppColors.getGradientForId(1)),
-              _buildGenreCard('Pop', AppColors.getGradientForId(0)),
-              _buildGenreCard('Chillout', AppColors.getGradientForId(5)),
-              _buildGenreCard('Acoustic', AppColors.getGradientForId(3)),
-              _buildGenreCard('Hip Hop', AppColors.getGradientForId(6)),
-            ],
-          ),
-          const SizedBox(height: 140),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildGenreCard(String title, List<Color> gradient) {
-    return GestureDetector(
-      onTap: () => _triggerSearchWithTag(title),
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: gradient,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: gradient[0].withValues(alpha: 0.15),
-              blurRadius: 8,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Stack(
+  Widget _youtubeBridge() => Container(
+    padding: const EdgeInsets.all(20),
+    decoration: BoxDecoration(
+      color: const Color(0xFF292125),
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: const Color(0xFF493137)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
           children: [
-            Positioned(
-              bottom: 12,
-              left: 12,
-              child: Text(
-                title,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 15,
-                  letterSpacing: -0.2,
-                ),
-              ),
+            Icon(
+              Icons.play_circle_fill_rounded,
+              color: Color(0xFFFF777B),
+              size: 24,
             ),
-            Positioned(
-              top: -8,
-              right: -8,
-              child: Icon(
-                Icons.music_note_rounded,
-                size: 56,
-                color: Colors.white.withValues(alpha: 0.10),
+            SizedBox(width: 9),
+            Expanded(
+              child: Text(
+                'Play here. Stay here.',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
               ),
             ),
           ],
         ),
-      ),
-    );
-  }
+        const SizedBox(height: 10),
+        Text(
+          _configured
+              ? 'Search above, choose a track, and listen with artwork, queue, and native audio controls.'
+              : 'Android supports no-key search and native online audio. The browser preview cannot resolve audio streams.',
+          style: const TextStyle(
+            fontSize: 13,
+            color: AppColors.textSecondary,
+            height: 1.5,
+          ),
+        ),
+        if (!_configured)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'No external app will be opened.',
+              style: TextStyle(fontSize: 11, color: AppColors.textMuted),
+            ),
+          ),
+      ],
+    ),
+  );
 }

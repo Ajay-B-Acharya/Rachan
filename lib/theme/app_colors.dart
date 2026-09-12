@@ -1,64 +1,53 @@
 import 'package:flutter/material.dart';
 
 class AppColors {
-  // Backgrounds
-  static const Color background = Color(0xFF08080C);
-  static const Color backgroundSurface = Color(0xFF101018);
+  static const Color background = Color(0xFF101113);
+  static const Color backgroundSurface = Color(0xFF1C1D21);
+  static const Color accent = Color(0xFFBBAAFF);
+  static const Color accentLight = Color(0xFFD7CCFF);
+  static const Color heartColor = Color(0xFFF28EAA);
 
-  // Accent Colors
-  static const Color accent = Color(0xFF9E86FF);
-  static const Color accentLight = Color(0xFFBFAFFF);
-  static const Color heartColor = Color(
-    0xFFFF3B30,
-  ); // Premium iOS/Spotify red for favorites
+  static final Color glassBackground = Colors.white.withValues(alpha: 0.04);
+  static final Color glassBorder = Colors.white.withValues(alpha: 0.08);
+  static final Color glassShadow = Colors.black.withValues(alpha: 0.18);
 
-  // Glassmorphic Colors
-  static final Color glassBackground = Colors.white.withValues(alpha: 0.06);
-  static final Color glassBorder = Colors.white.withValues(alpha: 0.10);
-  static final Color glassShadow = Colors.black.withValues(alpha: 0.3);
+  static const Color textPrimary = Color(0xFFF4F2EE);
+  static const Color textSecondary = Color(0xFFABAAB2);
+  static const Color textMuted = Color(0xFF85848E);
 
-  // Text Colors
-  static const Color textPrimary = Colors.white;
-  static const Color textSecondary = Color(0xFFA0A0B0);
-  static const Color textMuted = Color(0xFF606070);
-
-  // Premium Predefined Gradients (for Dynamic Album Artwork and Screen Overlay Backdrops)
   static const List<Color> gradientSunset = [
-    Color(0xFFFF512F),
-    Color(0xFFDD2476),
+    Color(0xFF9B665A),
+    Color(0xFF4E3544),
   ];
   static const List<Color> gradientOcean = [
-    Color(0xFF1A2980),
-    Color(0xFF26D0CE),
+    Color(0xFF567F87),
+    Color(0xFF253842),
   ];
   static const List<Color> gradientVapor = [
-    Color(0xFF7F00FF),
-    Color(0xFFFF007F),
+    Color(0xFF8A7BB0),
+    Color(0xFF39304E),
   ];
   static const List<Color> gradientEmerald = [
-    Color(0xFF11998e),
-    Color(0xFF38ef7d),
+    Color(0xFF748C78),
+    Color(0xFF2B403A),
   ];
   static const List<Color> gradientMidnight = [
-    Color(0xFF0F2027),
-    Color(0xFF203A43),
-    Color(0xFF2C5364),
+    Color(0xFF4C5878),
+    Color(0xFF222A3C),
   ];
   static const List<Color> gradientFiery = [
-    Color(0xFFf12711),
-    Color(0xFFf5af19),
+    Color(0xFFB19361),
+    Color(0xFF54412D),
   ];
   static const List<Color> gradientAmethyst = [
-    Color(0xFF9E2A2B),
-    Color(0xFF6A0DAD),
+    Color(0xFF956D88),
+    Color(0xFF442D48),
   ];
   static const List<Color> gradientAura = [
-    Color(0xFF3A1C71),
-    Color(0xFFD76D77),
-    Color(0xFFFFAF7B),
+    Color(0xFFAD9188),
+    Color(0xFF575060),
   ];
 
-  // List of all gradients to dynamically select from
   static const List<List<Color>> allGradients = [
     gradientVapor,
     gradientOcean,
@@ -70,7 +59,6 @@ class AppColors {
     gradientAura,
   ];
 
-  static List<Color> getGradientForId(int id) {
-    return allGradients[id % allGradients.length];
-  }
+  static List<Color> getGradientForId(int id) =>
+      allGradients[id % allGradients.length];
 }

@@ -2,23 +2,36 @@ import 'package:flutter/material.dart';
 
 import '../models/playlist.dart';
 import '../models/song.dart';
+import '../models/youtube_video.dart';
 import '../services/audio_service.dart';
-import '../services/jamendo_service.dart';
+import '../services/youtube_catalog.dart';
 import '../theme/app_colors.dart';
 import '../widgets/album_art.dart';
-import '../widgets/glass_card.dart';
-import '../widgets/song_card.dart';
+import '../widgets/motion.dart';
+import '../widgets/youtube_card.dart';
 
 class HomeScreen extends StatefulWidget {
   final AudioService audioService;
   final Function(Song, [List<Song>? queue]) onSongTap;
   final Function(Playlist) onPlaylistPlayTap;
+  final VoidCallback? onLocalTap;
+  final ValueChanged<String>? onSearchTap;
+  final ValueChanged<YoutubeVideo>? onVideoTap;
+  final void Function(YoutubeVideo, List<YoutubeVideo>)? onVideoQueueTap;
+  final bool? youtubeConfigured;
+  final Future<List<YoutubeVideo>> Function()? loadVideos;
 
   const HomeScreen({
     super.key,
     required this.audioService,
     required this.onSongTap,
     required this.onPlaylistPlayTap,
+    this.onLocalTap,
+    this.onSearchTap,
+    this.onVideoTap,
+    this.onVideoQueueTap,
+    this.youtubeConfigured,
+    this.loadVideos,
   });
 
   @override
@@ -26,541 +39,556 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final JamendoService _jamendoService = JamendoService.instance;
-
-  List<Song> _trendingTracks = [];
-  List<Song> _recentTracks = [];
-  List<Song> _recommendedTracks = [];
-
-  bool _isLoading = true;
-  String? _errorMessage;
+  List<YoutubeVideo> _videos = [];
+  bool _loading = false;
+  String? _error;
+  bool get _configured =>
+      widget.youtubeConfigured ?? YoutubeCatalog.instance.isAvailable;
 
   @override
   void initState() {
     super.initState();
-    _loadOnlineMusic();
+    if (_configured) _load();
   }
 
-  Future<void> _loadOnlineMusic({bool forceRefresh = false}) async {
-    if (mounted) {
-      setState(() {
-        _isLoading = true;
-        _errorMessage = null;
-      });
-    }
-
+  Future<void> _load({bool refresh = false}) async {
+    if (!_configured || _loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
-      // Fetch trending, recent & recommended in parallel for optimal speed
-      final results = await Future.wait([
-        _jamendoService.getTrendingTracks(limit: 15, forceRefresh: forceRefresh),
-        _jamendoService.getRecentlyDiscoveredTracks(
-          limit: 15,
-          forceRefresh: forceRefresh,
-        ),
-        _jamendoService.getRecommendedTracks(
-          limit: 15,
-          forceRefresh: forceRefresh,
-        ),
-      ]);
+      final videos =
+          await (widget.loadVideos?.call() ??
+              YoutubeCatalog.instance.discover(forceRefresh: refresh));
+      if (mounted) {
+        setState(() {
+          _videos = videos;
+          _loading = false;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = error is YoutubeSourceException
+              ? error.message
+              : 'Discovery is unavailable. Try a search or paste a video link.';
+          _loading = false;
+        });
+      }
+    }
+  }
 
-      if (!mounted) return;
-
-      final trending = results[0];
-      final recent = results[1];
-      final recommended = results[2];
-
-      // Register all fetched tracks into global audio service catalog
-      widget.audioService.registerSongs([
-        ...trending,
-        ...recent,
-        ...recommended,
-      ]);
-
-      setState(() {
-        _trendingTracks = trending;
-        _recentTracks = recent;
-        _recommendedTracks = recommended;
-        _isLoading = false;
-        if (trending.isEmpty && recent.isEmpty && recommended.isEmpty) {
-          _errorMessage =
-              'Could not reach Jamendo servers. Check your internet connection.';
-        }
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Network connection issue. Tap to retry.';
-      });
+  void _playResult(YoutubeVideo video) {
+    if (widget.onVideoQueueTap != null) {
+      widget.onVideoQueueTap!(video, _videos);
+    } else {
+      widget.onVideoTap?.call(video);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final hour = DateTime.now().hour;
-    final greeting = hour < 12
-        ? 'Good morning'
-        : hour < 17
-            ? 'Good afternoon'
-            : 'Good evening';
-
     return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF140F26), AppColors.background],
-            stops: [0.0, 0.45],
-          ),
-        ),
-        child: SafeArea(
-          bottom: false,
-          child: RefreshIndicator(
-            color: AppColors.accent,
-            backgroundColor: AppColors.backgroundSurface,
-            onRefresh: () => _loadOnlineMusic(forceRefresh: true),
-            child: SingleChildScrollView(
-              physics: const AlwaysScrollableScrollPhysics(
-                parent: BouncingScrollPhysics(),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 24),
-
-                  // ── Header ────────────────────────────────────────────────────
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            greeting,
-                            style: Theme.of(context)
-                                .textTheme
-                                .headlineMedium
-                                ?.copyWith(
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: -0.6,
-                                ),
+      body: SafeArea(
+        bottom: false,
+        child: RefreshIndicator(
+          onRefresh: () => _load(refresh: true),
+          child: CustomScrollView(
+            key: const PageStorageKey('home-scroll'),
+            physics: const AlwaysScrollableScrollPhysics(
+              parent: BouncingScrollPhysics(),
+            ),
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 26),
+                sliver: SliverToBoxAdapter(
+                  child: EnterTransition(
+                    child: Row(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.asset(
+                            'assets/brand_mark.png',
+                            width: 42,
+                            height: 42,
+                            cacheWidth: 126,
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Discover online and local music',
-                            style: Theme.of(context)
-                                .textTheme
-                                .bodyMedium
-                                ?.copyWith(
-                                  color: AppColors.textSecondary,
-                                  fontSize: 13,
-                                ),
-                          ),
-                        ],
-                      ),
-                      GestureDetector(
-                        onTap: () => _loadOnlineMusic(forceRefresh: true),
-                        child: Container(
-                          padding: const EdgeInsets.all(2),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            gradient: LinearGradient(
-                              colors: AppColors.getGradientForId(3),
-                            ),
-                          ),
-                          child: CircleAvatar(
-                            radius: 19,
-                            backgroundColor: AppColors.backgroundSurface,
-                            child: const Icon(
-                              Icons.refresh_rounded,
-                              color: AppColors.accent,
-                              size: 20,
+                        ),
+                        const SizedBox(width: 11),
+                        const Expanded(
+                          child: Text(
+                            'harmoniq',
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: -1,
                             ),
                           ),
                         ),
+                        IconButton.outlined(
+                          tooltip: 'Search music',
+                          onPressed: () => widget.onSearchTap?.call(''),
+                          icon: const Icon(Icons.search_rounded, size: 22),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                sliver: SliverToBoxAdapter(
+                  child: EnterTransition(
+                    delay: const Duration(milliseconds: 70),
+                    child: _hero(),
+                  ),
+                ),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+                sliver: SliverToBoxAdapter(
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _sourcePill(
+                        Icons.play_circle_fill_rounded,
+                        'YouTube · in-app',
+                        const Color(0xFFFF7878),
+                      ),
+                      _sourcePill(
+                        Icons.offline_pin_outlined,
+                        'Your files. Always yours.',
+                        AppColors.accent,
                       ),
                     ],
                   ),
-                  const SizedBox(height: 28),
-
-                  // ── Network Error Banner ──────────────────────────────────────
-                  if (_errorMessage != null) ...[
-                    GestureDetector(
-                      onTap: () => _loadOnlineMusic(forceRefresh: true),
-                      child: GlassCard(
-                        borderRadius: 14,
-                        blurSigma: 0,
-                        color: Colors.red.withValues(alpha: 0.12),
-                        borderColor: Colors.red.withValues(alpha: 0.3),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
+                ),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(24, 32, 24, 16),
+                sliver: SliverToBoxAdapter(
+                  child: _heading(
+                    'Pick a frequency.',
+                    'A soundtrack for wherever your head is.',
+                  ),
+                ),
+              ),
+              SliverToBoxAdapter(
+                child: SizedBox(
+                  height:
+                      190 + (MediaQuery.textScalerOf(context).scale(140) - 140),
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    children: [
+                      _mood(
+                        'After hours',
+                        'Late night R&B',
+                        '01',
+                        const Color(0xFFBBAAFF),
+                        const Color(0xFF30283E),
+                      ),
+                      _mood(
+                        'Tunnel vision',
+                        'Focus instrumental music',
+                        '02',
+                        const Color(0xFFBCD8C6),
+                        const Color(0xFF223B35),
+                      ),
+                      _mood(
+                        'Full volume',
+                        'Alternative rock music',
+                        '03',
+                        const Color(0xFFF5AD8F),
+                        const Color(0xFF442D29),
+                      ),
+                      _mood(
+                        'Soft landing',
+                        'Acoustic chill music',
+                        '04',
+                        const Color(0xFFE8D99D),
+                        const Color(0xFF3C3729),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (_configured) ...[
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(24, 32, 24, 16),
+                  sliver: SliverToBoxAdapter(
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _heading(
+                            'In the spotlight',
+                            'Find a track. Make it your soundtrack.',
+                          ),
                         ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.wifi_off_rounded,
-                              color: Colors.redAccent,
-                              size: 20,
+                        IconButton(
+                          tooltip: 'Refresh tracks',
+                          onPressed: _loading
+                              ? null
+                              : () => _load(refresh: true),
+                          icon: const Icon(Icons.refresh_rounded),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                if (_loading)
+                  const SliverToBoxAdapter(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Center(
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                  ),
+                if (_error != null)
+                  SliverPadding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    sliver: SliverToBoxAdapter(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _error!,
+                            style: const TextStyle(
+                              color: AppColors.textSecondary,
                             ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                _errorMessage!,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12.5,
-                                ),
-                              ),
-                            ),
-                            const Text(
-                              'Retry',
-                              style: TextStyle(
-                                color: AppColors.accentLight,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ],
+                          ),
+                          TextButton(
+                            onPressed: () => _load(refresh: true),
+                            child: const Text('Try again'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (!_loading && _error == null && _videos.isEmpty)
+                  const SliverToBoxAdapter(
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 24),
+                      child: Text(
+                        'No tracks available right now.',
+                        style: TextStyle(color: AppColors.textSecondary),
+                      ),
+                    ),
+                  ),
+                if (_videos.isNotEmpty)
+                  SliverToBoxAdapter(
+                    child: SizedBox(
+                      height:
+                          118 +
+                          (MediaQuery.textScalerOf(context).scale(74) - 74),
+                      child: ListView.separated(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _videos.length,
+                        separatorBuilder: (_, index) =>
+                            const SizedBox(width: 16),
+                        itemBuilder: (_, index) => SizedBox(
+                          width: 324,
+                          child: YoutubeCard(
+                            video: _videos[index],
+                            onTap: () => _playResult(_videos[index]),
+                          ),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 20),
-                  ],
-
-                  // ── ONLINE SECTION 1: Trending / Popular ─────────────────────
-                  _buildSectionHeader(
-                    title: 'Trending / Popular',
-                    tag: 'ONLINE',
-                    tagColor: AppColors.accentLight,
-                    onSeeAll: () {},
                   ),
-                  const SizedBox(height: 14),
-                  _buildTrackCarousel(
-                    tracks: _trendingTracks,
-                    isLoading: _isLoading,
-                  ),
-                  const SizedBox(height: 32),
-
-                  // ── ONLINE SECTION 2: Recently Discovered ───────────────────
-                  _buildSectionHeader(
-                    title: 'Recently Discovered',
-                    tag: 'JAMENDO',
-                    tagColor: const Color(0xFF38ef7d),
-                    onSeeAll: () {},
-                  ),
-                  const SizedBox(height: 14),
-                  _buildTrackCarousel(
-                    tracks: _recentTracks,
-                    isLoading: _isLoading,
-                  ),
-                  const SizedBox(height: 32),
-
-                  // ── ONLINE SECTION 3: Recommended ────────────────────────────
-                  _buildSectionHeader(
-                    title: 'Recommended For You',
-                    tag: 'FEATURED',
-                    tagColor: const Color(0xFFFF512F),
-                    onSeeAll: () {},
-                  ),
-                  const SizedBox(height: 14),
-                  _buildTrackCarousel(
-                    tracks: _recommendedTracks,
-                    isLoading: _isLoading,
-                  ),
-                  const SizedBox(height: 32),
-
-                  // ── DEVICE MUSIC SECTION (If available) ──────────────────────
-                  ListenableBuilder(
+              ],
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(24, 30, 24, 0),
+                sliver: SliverToBoxAdapter(child: _bridgeCard()),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(24, 28, 24, 32),
+                sliver: SliverToBoxAdapter(
+                  child: ListenableBuilder(
                     listenable: widget.audioService,
                     builder: (context, _) {
                       final local = widget.audioService.localSongs;
-                      if (local.isEmpty) return const SizedBox.shrink();
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _buildSectionHeader(
-                            title: 'From Your Device',
-                            tag: 'LOCAL',
-                            tagColor: Colors.amberAccent,
-                            onSeeAll: () {},
+                      return Pressable(
+                        onTap: widget.onLocalTap,
+                        child: Container(
+                          padding: const EdgeInsets.all(20),
+                          decoration: BoxDecoration(
+                            color: AppColors.backgroundSurface,
+                            borderRadius: BorderRadius.circular(20),
                           ),
-                          const SizedBox(height: 14),
-                          _buildTrackCarousel(
-                            tracks: local,
-                            isLoading: false,
-                          ),
-                          const SizedBox(height: 32),
-                        ],
-                      );
-                    },
-                  ),
-
-                  // ── Made For You (Playlists) ─────────────────────────────────
-                  Text(
-                    'Made For You',
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 19,
-                        ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  ListenableBuilder(
-                    listenable: widget.audioService,
-                    builder: (context, child) {
-                      final currentPlaylists = widget.audioService.playlists;
-                      return GridView.builder(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        itemCount: currentPlaylists.length,
-                        gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2,
-                          crossAxisSpacing: 16,
-                          mainAxisSpacing: 16,
-                          childAspectRatio: 1.15,
-                        ),
-                        itemBuilder: (context, index) {
-                          final playlist = currentPlaylists[index];
-                          return GestureDetector(
-                            onTap: () => widget.onPlaylistPlayTap(playlist),
-                            child: GlassCard(
-                              borderRadius: 14,
-                              blurSigma: 0,
-                              padding: const EdgeInsets.all(12),
-                              color: Colors.white.withValues(alpha: 0.04),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      AlbumArt(
-                                        gradientId: playlist.gradientId,
-                                        size: 44,
-                                        borderRadius: 8,
-                                        showShadow: true,
-                                        overlayIcon:
-                                            Icons.playlist_play_rounded,
-                                      ),
-                                      Container(
-                                        padding: const EdgeInsets.all(5),
-                                        decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          color: Colors.white
-                                              .withValues(alpha: 0.08),
-                                          border: Border.all(
-                                            color: Colors.white
-                                                .withValues(alpha: 0.12),
-                                            width: 0.8,
-                                          ),
-                                        ),
-                                        child: const Icon(
-                                          Icons.play_arrow_rounded,
-                                          color: Colors.white,
-                                          size: 16,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        playlist.name,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .bodyLarge
-                                            ?.copyWith(
-                                              fontWeight: FontWeight.w600,
-                                              fontSize: 14,
-                                            ),
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        '${playlist.songs.length} songs',
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .bodySmall
-                                            ?.copyWith(
-                                              color: AppColors.textSecondary,
-                                              fontSize: 11,
-                                            ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
+                          child: Row(
+                            children: [
+                              AlbumArt(
+                                gradientId: 1,
+                                size: 56,
+                                borderRadius: 12,
+                                showShadow: false,
+                                overlayIcon: Icons.library_music_outlined,
                               ),
-                            ),
-                          );
-                        },
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text(
+                                      'The offline collection',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 16,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 5),
+                                    Text(
+                                      local.isEmpty
+                                          ? 'Your music, without the Wi-Fi.'
+                                          : '${local.length} tracks, ready when you are.',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: AppColors.textSecondary,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const Icon(Icons.arrow_forward_rounded, size: 20),
+                            ],
+                          ),
+                        ),
                       );
                     },
                   ),
-
-                  const SizedBox(height: 130),
-                ],
+                ),
               ),
-            ),
+            ],
           ),
         ),
       ),
     );
   }
 
-  Widget _buildSectionHeader({
-    required String title,
-    required String tag,
-    required Color tagColor,
-    required VoidCallback onSeeAll,
-  }) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+  Widget _hero() => Container(
+    clipBehavior: Clip.antiAlias,
+    decoration: BoxDecoration(
+      color: const Color(0xFFD8CDFA),
+      borderRadius: BorderRadius.circular(26),
+    ),
+    child: Stack(
       children: [
-        Row(
-          children: [
-            Text(
-              title,
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 19,
-                  ),
-            ),
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: tagColor.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(
-                  color: tagColor.withValues(alpha: 0.35),
-                  width: 0.8,
+        const Positioned(
+          right: -44,
+          top: -20,
+          bottom: -20,
+          width: 255,
+          child: IgnorePointer(child: CustomPaint(painter: _RecordPainter())),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(26),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'LESS SCROLL. MORE SOUL.',
+                style: TextStyle(
+                  color: Color(0xFF4C3E66),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 2,
                 ),
               ),
-              child: Text(
-                tag,
+              const SizedBox(height: 26),
+              const Text(
+                'Meet your\nnext obsession.',
                 style: TextStyle(
-                  color: tagColor,
-                  fontSize: 9,
+                  color: Color(0xFF201B2A),
+                  fontSize: 38,
+                  height: 1.03,
+                  letterSpacing: -1.8,
                   fontWeight: FontWeight.w800,
-                  letterSpacing: 0.6,
                 ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Deep cuts. Big feelings.\nA whole world of music.',
+                style: TextStyle(
+                  color: Color(0xFF51465E),
+                  fontSize: 14,
+                  height: 1.5,
+                ),
+              ),
+              const SizedBox(height: 25),
+              FilledButton.icon(
+                onPressed: () => widget.onSearchTap?.call(''),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF201B2A),
+                  foregroundColor: Colors.white,
+                ),
+                icon: const Icon(Icons.play_arrow_rounded, size: 20),
+                label: const Text('Find your next song'),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _sourcePill(IconData icon, String label, Color color) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+    decoration: BoxDecoration(
+      border: Border.all(color: Colors.white10),
+      borderRadius: BorderRadius.circular(30),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 15, color: color),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 11,
+              color: AppColors.textSecondary,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _heading(String title, String subtitle) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(title, style: Theme.of(context).textTheme.titleLarge),
+      const SizedBox(height: 5),
+      Text(
+        subtitle,
+        style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
+      ),
+    ],
+  );
+
+  Widget _mood(
+    String title,
+    String query,
+    String number,
+    Color ink,
+    Color background,
+  ) => Padding(
+    padding: const EdgeInsets.only(right: 12),
+    child: SizedBox(
+      width: 174 + (MediaQuery.textScalerOf(context).scale(174) - 174),
+      child: Pressable(
+        onTap: () => widget.onSearchTap?.call(query),
+        child: Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: background,
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    number,
+                    style: TextStyle(
+                      color: ink.withValues(alpha: 0.7),
+                      fontSize: 12,
+                    ),
+                  ),
+                  Icon(Icons.arrow_outward_rounded, color: ink, size: 18),
+                ],
+              ),
+              const Spacer(),
+              Text(
+                title,
+                style: TextStyle(
+                  color: ink,
+                  fontSize: 21,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: -0.7,
+                ),
+              ),
+              const SizedBox(height: 5),
+              Text(
+                'Find your mix',
+                style: TextStyle(
+                  color: ink.withValues(alpha: 0.7),
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Widget _bridgeCard() => Container(
+    padding: const EdgeInsets.all(22),
+    decoration: BoxDecoration(
+      border: Border.all(color: Colors.white12),
+      borderRadius: BorderRadius.circular(20),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.link_rounded, color: Color(0xFFFF9990), size: 23),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Already have a favorite?',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
               ),
             ),
           ],
         ),
-      ],
-    );
-  }
-
-  Widget _buildTrackCarousel({
-    required List<Song> tracks,
-    required bool isLoading,
-  }) {
-    if (isLoading) {
-      return SizedBox(
-        height: 190,
-        child: ListView.builder(
-          scrollDirection: Axis.horizontal,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: 4,
-          itemBuilder: (context, index) {
-            return Container(
-              width: 135,
-              margin: const EdgeInsets.only(right: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 135,
-                    height: 135,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.05),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.06),
-                        width: 1,
-                      ),
-                    ),
-                    child: const Center(
-                      child: SizedBox(
-                        width: 22,
-                        height: 22,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(
-                            AppColors.accent,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Container(
-                    width: 100,
-                    height: 12,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.07),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Container(
-                    width: 60,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.04),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
-      );
-    }
-
-    if (tracks.isEmpty) {
-      return Container(
-        height: 80,
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.03),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: const Center(
-          child: Text(
-            'No tracks available currently.',
-            style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+        const SizedBox(height: 10),
+        Text(
+          _configured
+              ? 'Search for an artist, pick a track, and listen with Harmoniq’s own player.'
+              : 'Paste a YouTube link to listen on Android. Online audio playback is unavailable in the browser preview.',
+          style: const TextStyle(
+            color: AppColors.textSecondary,
+            fontSize: 13,
+            height: 1.5,
           ),
         ),
-      );
-    }
+        const SizedBox(height: 12),
+        TextButton.icon(
+          onPressed: () => widget.onSearchTap?.call(''),
+          icon: const Icon(Icons.search_rounded, size: 18),
+          label: const Text('Find a song'),
+        ),
+      ],
+    ),
+  );
+}
 
-    return SizedBox(
-      height: 190,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        physics: const BouncingScrollPhysics(),
-        itemCount: tracks.length,
-        itemBuilder: (context, index) {
-          final song = tracks[index];
-          return SongCard(
-            song: song,
-            onTap: () => widget.onSongTap(song, tracks),
-          );
-        },
-      ),
-    );
+class _RecordPainter extends CustomPainter {
+  const _RecordPainter();
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width * 0.8, size.height * 0.55);
+    final paint = Paint()
+      ..color = const Color(0x182D2047)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    for (double r = 28; r < 220; r += 12) {
+      canvas.drawCircle(center, r, paint);
+    }
+    canvas.drawCircle(center, 22, Paint()..color = const Color(0x202D2047));
   }
+
+  @override
+  bool shouldRepaint(covariant _RecordPainter oldDelegate) => false;
 }

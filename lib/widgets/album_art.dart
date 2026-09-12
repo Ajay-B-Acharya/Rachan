@@ -101,15 +101,23 @@ class AlbumArt extends StatelessWidget {
                 width: size,
                 height: size,
                 fit: BoxFit.cover,
+                cacheWidth: (size * MediaQuery.devicePixelRatioOf(context))
+                    .ceil()
+                    .clamp(1, 1200),
+                filterQuality: FilterQuality.low,
+                excludeFromSemantics: true,
                 errorBuilder: (context, error, stackTrace) {
                   // Gracefully falls back to gradient underneath
                   return const SizedBox.shrink();
                 },
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) return child;
+                frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+                  if (wasSynchronouslyLoaded ||
+                      MediaQuery.disableAnimationsOf(context)) {
+                    return child;
+                  }
                   return AnimatedOpacity(
-                    opacity: 0.4,
-                    duration: const Duration(milliseconds: 200),
+                    opacity: frame == null ? 0 : 1,
+                    duration: const Duration(milliseconds: 240),
                     child: child,
                   );
                 },

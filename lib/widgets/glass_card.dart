@@ -74,10 +74,7 @@ class GlassCard extends StatelessWidget {
         // Only pay the BackdropFilter GPU cost when blur is actually needed.
         child: blurSigma > 0
             ? BackdropFilter(
-                filter: ImageFilter.blur(
-                  sigmaX: blurSigma,
-                  sigmaY: blurSigma,
-                ),
+                filter: ImageFilter.blur(sigmaX: blurSigma, sigmaY: blurSigma),
                 child: inner,
               )
             : inner,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio_background/just_audio_background.dart';
@@ -13,6 +15,9 @@ import 'screens/now_playing_screen.dart';
 import 'screens/local_screen.dart';
 import 'widgets/bottom_nav.dart';
 import 'widgets/mini_player.dart';
+import 'widgets/motion.dart';
+import 'models/song.dart';
+import 'models/youtube_video.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,60 +44,6 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// ── Animated logo splash ───────────────────────────────────────────────────────
-class _AnimatedLogo extends StatefulWidget {
-  const _AnimatedLogo();
-
-  @override
-  State<_AnimatedLogo> createState() => _AnimatedLogoState();
-}
-
-class _AnimatedLogoState extends State<_AnimatedLogo>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
-  late Animation<double> _scale;
-  late Animation<double> _fade;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    );
-    _scale = Tween<double>(begin: 0.78, end: 1.0).animate(
-      CurvedAnimation(parent: _ctrl, curve: Curves.easeOutBack),
-    );
-    _fade = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _ctrl, curve: const Interval(0.0, 0.6)),
-    );
-    _ctrl.forward();
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _ctrl,
-      builder: (context, child) => FadeTransition(
-        opacity: _fade,
-        child: ScaleTransition(
-          scale: _scale,
-          child: child,
-        ),
-      ),
-      // child is constant — only animation values change each frame
-      child: Image.asset('assets/logo.png', width: 160, height: 160),
-    );
-  }
-}
-
-// ── Splash ────────────────────────────────────────────────────────────────────
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -105,14 +56,14 @@ class _SplashScreenState extends State<SplashScreen> {
   void initState() {
     super.initState();
     _checkAndRequestPermissionsOnce();
-    Future.delayed(const Duration(milliseconds: 2200), () {
+    Future.delayed(const Duration(milliseconds: 900), () {
       if (mounted) {
         Navigator.of(context).pushReplacement(
           PageRouteBuilder(
             pageBuilder: (ctx, a1, a2) => const MainContainer(),
             transitionsBuilder: (ctx, animation, a2, child) =>
                 FadeTransition(opacity: animation, child: child),
-            transitionDuration: const Duration(milliseconds: 500),
+            transitionDuration: motionDuration(context, 320),
           ),
         );
       }
@@ -142,10 +93,17 @@ class _SplashScreenState extends State<SplashScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const _AnimatedLogo(),
+            EnterTransition(
+              child: Image.asset(
+                'assets/logo.png',
+                width: 240,
+                height: 240,
+                cacheWidth: 720,
+              ),
+            ),
             const SizedBox(height: 20),
             const Text(
-              'MUSIC LIVES WITH YOU',
+              'YOUR MUSIC. YOUR RHYTHM.',
               style: TextStyle(
                 fontSize: 11,
                 color: AppColors.textMuted,
@@ -160,24 +118,9 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 }
 
-// ── MainContainer ─────────────────────────────────────────────────────────────
-//
-// KEY PERFORMANCE RULES:
-//
-//  1. `_pages` is built ONCE in initState and never recreated. PageView keeps
-//     all four screens alive across swipes — zero teardown/rebuild on tab
-//     change.
-//
-//  2. `build()` only calls setState for `_currentIndex`. It does NOT listen to
-//     AudioService at all. The bottom overlay has its own ListenableBuilder
-//     so only MiniPlayer + BottomNav rebuild on audio state changes.
-//
-//  3. Audio position ticks go to `playbackPositionNotifier` (ValueNotifier),
-//     consumed by ValueListenableBuilder inside MiniPlayer and NowPlayingScreen
-//     only — zero notifyListeners() per tick.
-//
 class MainContainer extends StatefulWidget {
-  const MainContainer({super.key});
+  final AudioService? audioService;
+  const MainContainer({super.key, this.audioService});
 
   @override
   State<MainContainer> createState() => _MainContainerState();
@@ -188,50 +131,48 @@ class _MainContainerState extends State<MainContainer> {
   late final PageController _pageController;
   late final AudioService _audioService;
 
-  // Pages are constructed ONCE. They each hold a reference to _audioService
-  // and subscribe internally with their own ListenableBuilder — so no page
-  // is ever rebuilt from here.
   late final List<Widget> _pages;
+  final _searchKey = GlobalKey<SearchScreenState>();
 
   @override
   void initState() {
     super.initState();
-    _audioService = AudioService();
+    _audioService = widget.audioService ?? AudioService();
     _pageController = PageController();
 
     _pages = [
       HomeScreen(
+        onLocalTap: () => _onTabTap(3),
+        onSearchTap: _openSearch,
+        onVideoTap: _playYoutube,
+        onVideoQueueTap: _playYoutubeQueue,
         audioService: _audioService,
         onSongTap: (song, [queue]) =>
-            _audioService.playSong(song, contextQueue: queue ?? _audioService.songs),
+            _playSong(song, contextQueue: queue ?? _audioService.songs),
         onPlaylistPlayTap: (playlist) {
           if (playlist.songs.isNotEmpty) {
-            _audioService.playSong(
-              playlist.songs[0],
-              contextQueue: playlist.songs,
-            );
+            _playSong(playlist.songs[0], contextQueue: playlist.songs);
           }
         },
       ),
       SearchScreen(
+        key: _searchKey,
+        onVideoTap: _playYoutube,
+        onVideoQueueTap: _playYoutubeQueue,
         audioService: _audioService,
-        onSongTap: (song) =>
-            _audioService.playSong(song, contextQueue: _audioService.songs),
+        onSongTap: (song) => _playSong(song, contextQueue: _audioService.songs),
         onFavoriteTap: _audioService.toggleFavorite,
       ),
       LibraryScreen(
         audioService: _audioService,
-        onSongTap: (song) =>
-            _audioService.playSong(song, contextQueue: _audioService.songs),
+        onSongTap: (song) => _playSong(song, contextQueue: _audioService.songs),
         onFavoriteTap: _audioService.toggleFavorite,
         onCreatePlaylist: _audioService.createPlaylist,
       ),
       LocalScreen(
         audioService: _audioService,
-        onSongTap: (song) => _audioService.playSong(
-          song,
-          contextQueue: _audioService.localSongs,
-        ),
+        onSongTap: (song) =>
+            _playSong(song, contextQueue: _audioService.localSongs),
         onFavoriteTap: _audioService.toggleFavorite,
         onScanTap: _audioService.scanLocalSongs,
       ),
@@ -241,17 +182,58 @@ class _MainContainerState extends State<MainContainer> {
   @override
   void dispose() {
     _pageController.dispose();
-    _audioService.dispose();
+    if (widget.audioService == null) _audioService.dispose();
     super.dispose();
   }
 
   void _onTabTap(int index) {
-    setState(() => _currentIndex = index);
-    _pageController.animateToPage(
-      index,
-      duration: const Duration(milliseconds: 280),
-      curve: Curves.easeOutCubic,
+    if (index == _currentIndex) return;
+    if (MediaQuery.disableAnimationsOf(context) ||
+        (index - _currentIndex).abs() > 1) {
+      _pageController.jumpToPage(index);
+    } else {
+      _pageController.animateToPage(
+        index,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
+    }
+  }
+
+  Future<void> _playSong(Song song, {List<Song>? contextQueue}) async {
+    if (song.source == SongSource.legacy) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('This saved track is from the previous source.'),
+          action: SnackBarAction(
+            label: 'Find on YouTube',
+            onPressed: () => _openSearch('${song.title} ${song.artist}'),
+          ),
+        ),
+      );
+      return;
+    }
+    await _audioService.playSong(song, contextQueue: contextQueue);
+  }
+
+  void _openSearch(String query) {
+    _pageController.jumpToPage(1);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchKey.currentState?.setQuery(query);
+    });
+  }
+
+  void _playYoutube(YoutubeVideo video) => _playYoutubeQueue(video, [video]);
+
+  void _playYoutubeQueue(YoutubeVideo video, List<YoutubeVideo> videos) {
+    final song = Song.fromYoutube(video);
+    unawaited(
+      _audioService.playSong(
+        song,
+        contextQueue: videos.map(Song.fromYoutube).toList(),
+      ),
     );
+    _openNowPlaying();
   }
 
   void _openNowPlaying() {
@@ -271,7 +253,7 @@ class _MainContainerState extends State<MainContainer> {
             child: child,
           );
         },
-        transitionDuration: const Duration(milliseconds: 380),
+        transitionDuration: motionDuration(context, 340),
       ),
     );
   }
@@ -279,56 +261,89 @@ class _MainContainerState extends State<MainContainer> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      resizeToAvoidBottomInset: false,
-      body: Stack(
-        children: [
-          // ── Page view: children never change after initState ───────────────
-          PageView(
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 1100),
+          child: PageView(
             controller: _pageController,
-            physics: const BouncingScrollPhysics(),
             onPageChanged: (index) => setState(() => _currentIndex = index),
-            children: _pages,
-          ),
-
-          // ── Bottom overlay: only this slim section rebuilds on audio events.
-          //    MiniPlayer's progress bar uses ValueListenableBuilder so even
-          //    position ticks don't cause a rebuild here.
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: ListenableBuilder(
-              listenable: _audioService,
-              builder: (context, child) {
-                final song = _audioService.currentSong;
-                final isPlaying = _audioService.isPlaying;
-                return Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (song != null)
-                      MiniPlayer(
-                        song: song,
-                        isPlaying: isPlaying,
-                        positionNotifier:
-                            _audioService.playbackPositionNotifier,
-                        onTap: _openNowPlaying,
-                        onPlayPauseTap: _audioService.togglePlay,
-                        onNextTap: _audioService.next,
-                        onPreviousTap: _audioService.previous,
-                        onCloseTap: _audioService.stopAndClear,
-                      ),
-                    const SizedBox(height: 10),
-                    BottomNav(
-                      currentIndex: _currentIndex,
-                      onTap: _onTabTap,
-                    ),
-                  ],
-                );
-              },
+            children: List.generate(
+              _pages.length,
+              (index) => _RetainedPage(
+                child: TickerMode(
+                  enabled: index == _currentIndex,
+                  child: _pages[index],
+                ),
+              ),
             ),
           ),
-        ],
+        ),
+      ),
+      bottomNavigationBar: Center(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 1100),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListenableBuilder(
+                listenable: _audioService,
+                builder: (context, child) {
+                  final song = _audioService.currentSong;
+                  final player = song == null
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(top: 6, bottom: 10),
+                          child: MiniPlayer(
+                            song: song,
+                            isPlaying: _audioService.isPlaying,
+                            isLoading: _audioService.isLoading,
+                            playbackError: _audioService.playbackError,
+                            wantsToPlay: _audioService.wantsToPlay,
+                            onRetryTap: _audioService.retryPlayback,
+                            positionNotifier:
+                                _audioService.playbackPositionNotifier,
+                            onTap: _openNowPlaying,
+                            onPlayPauseTap: _audioService.togglePlay,
+                            onNextTap: _audioService.next,
+                            onPreviousTap: _audioService.previous,
+                            onCloseTap: _audioService.stopAndClear,
+                          ),
+                        );
+                  if (MediaQuery.disableAnimationsOf(context)) return player;
+                  return AnimatedSize(
+                    duration: motionDuration(context),
+                    curve: Curves.easeOutCubic,
+                    alignment: Alignment.bottomCenter,
+                    child: player,
+                  );
+                },
+              ),
+              BottomNav(currentIndex: _currentIndex, onTap: _onTabTap),
+            ],
+          ),
+        ),
       ),
     );
+  }
+}
+
+class _RetainedPage extends StatefulWidget {
+  final Widget child;
+  const _RetainedPage({required this.child});
+
+  @override
+  State<_RetainedPage> createState() => _RetainedPageState();
+}
+
+class _RetainedPageState extends State<_RetainedPage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
   }
 }

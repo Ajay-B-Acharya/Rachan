@@ -1,11 +1,11 @@
 {
-    "name": "rachan",
-    "short_name": "rachan",
+    "name": "Harmoniq",
+    "short_name": "Harmoniq",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#101113",
+    "theme_color": "#101113",
+    "description": "Harmoniq — Your music. Your rhythm.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

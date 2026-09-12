@@ -27,7 +27,8 @@ class LibraryScreen extends StatefulWidget {
 
 class _LibraryScreenState extends State<LibraryScreen> {
   int _selectedCategoryIndex = 0;
-  int _favoriteFilterIndex = 0; // 0 = All, 1 = Local, 2 = Jamendo
+  int _favoriteFilterIndex =
+      0; // 0 = All, 1 = Local, 2 = Previous source, 3 = YouTube
   final List<String> _categories = [
     'Songs',
     'Playlists',
@@ -35,19 +36,39 @@ class _LibraryScreenState extends State<LibraryScreen> {
     'Favorites',
   ];
 
-  // Album map cache — recomputed only when _cachedSongs reference changes.
-  List<Song>? _cachedSongs;
+  AudioService? _cachedService;
+  int _cachedCatalogRevision = -1;
+  int _cachedLocalRevision = -1;
+  List<Song> _librarySongs = [];
   Map<String, List<Song>> _albumMap = {};
+  List<String> _albumKeys = [];
 
-  Map<String, List<Song>> _getAlbumMap(List<Song> songs) {
-    if (!identical(songs, _cachedSongs)) {
-      _cachedSongs = songs;
-      _albumMap = {};
-      for (final song in songs) {
-        _albumMap.putIfAbsent(song.album, () => []).add(song);
-      }
+  void _refreshLibraryCache() {
+    final service = widget.audioService;
+    if (identical(service, _cachedService) &&
+        service.catalogRevision == _cachedCatalogRevision &&
+        service.localSongsRevision == _cachedLocalRevision) {
+      return;
     }
-    return _albumMap;
+    _cachedService = service;
+    _cachedCatalogRevision = service.catalogRevision;
+    _cachedLocalRevision = service.localSongsRevision;
+
+    // Local metadata takes precedence, matching the existing library order.
+    final localIdentities = service.localSongs
+        .map((song) => song.identity)
+        .toSet();
+    _librarySongs = [
+      ...service.localSongs,
+      ...service.songs.where(
+        (song) => !localIdentities.contains(song.identity),
+      ),
+    ];
+    _albumMap = {};
+    for (final song in _librarySongs) {
+      _albumMap.putIfAbsent(song.album, () => []).add(song);
+    }
+    _albumKeys = _albumMap.keys.toList();
   }
 
   @override
@@ -55,15 +76,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     // The scaffold chrome (title, category chips) is pure local state.
     // Only the Expanded content list needs AudioService — listener is scoped there.
     return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF1E0C1C), AppColors.background],
-            stops: [0.0, 0.45],
-          ),
-        ),
+      body: Material(
+        color: AppColors.background,
         child: SafeArea(
           bottom: false,
           child: Padding(
@@ -79,9 +93,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   children: [
                     Text(
                       'Your Library',
-                      style: Theme.of(context)
-                          .textTheme
-                          .headlineMedium
+                      style: Theme.of(context).textTheme.headlineMedium
                           ?.copyWith(
                             fontWeight: FontWeight.w800,
                             letterSpacing: -0.6,
@@ -89,8 +101,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     ),
                     if (_selectedCategoryIndex == 1)
                       IconButton(
-                        icon: const Icon(Icons.add_rounded,
-                            color: Colors.white, size: 28),
+                        icon: const Icon(
+                          Icons.add_rounded,
+                          color: Colors.white,
+                          size: 28,
+                        ),
                         onPressed: _showCreatePlaylistDialog,
                         splashRadius: 24,
                       ),
@@ -115,7 +130,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           curve: Curves.easeOutCubic,
                           margin: const EdgeInsets.only(right: 12),
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 18, vertical: 8),
+                            horizontal: 18,
+                            vertical: 8,
+                          ),
                           decoration: BoxDecoration(
                             color: isSelected
                                 ? AppColors.accent
@@ -152,7 +169,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   child: ListenableBuilder(
                     listenable: widget.audioService,
                     builder: (context, child) => _buildCategoryContent(
-                      songs: widget.audioService.songs,
                       playlists: widget.audioService.playlists,
                       currentSong: widget.audioService.currentSong,
                       isPlaying: widget.audioService.isPlaying,
@@ -168,18 +184,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildCategoryContent({
-    required List<Song> songs,
     required List<Playlist> playlists,
     required Song? currentSong,
     required bool isPlaying,
   }) {
+    _refreshLibraryCache();
     switch (_selectedCategoryIndex) {
       case 0:
-        return _buildSongsList(songs, currentSong, isPlaying);
+        return _buildSongsList(_librarySongs, currentSong, isPlaying);
       case 1:
         return _buildPlaylistsView(playlists);
       case 2:
-        return _buildAlbumsView(songs);
+        return _buildAlbumsView();
       case 3:
         return _buildFavoritesList(
           widget.audioService.favorites,
@@ -191,19 +207,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  Widget _buildSongsList(
-      List<Song> songs, Song? currentSong, bool isPlaying) {
-    final allSongs = [
-      ...widget.audioService.localSongs,
-      ...songs.where((s) =>
-          !widget.audioService.localSongs.any((l) => l.id == s.id)),
-    ];
+  void _onSongTap(Song song) {
+    if (song.source != SongSource.legacy) {
+      widget.onSongTap(song);
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Previous source unavailable. Search for "${song.title}" '
+          'by ${song.artist} in YouTube Music.',
+        ),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
 
+  Widget _buildSongsList(
+    List<Song> allSongs,
+    Song? currentSong,
+    bool isPlaying,
+  ) {
     if (allSongs.isEmpty) {
       return _buildEmptyState(
         Icons.music_note_rounded,
         'Your library is empty',
-        subtitle: 'Scan your device in Local tab or discover Jamendo music',
+        subtitle: 'Scan your device in the Local tab to add music',
       );
     }
     return ListView.builder(
@@ -212,12 +241,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       itemBuilder: (context, index) {
         if (index == allSongs.length) return const SizedBox(height: 130);
         final song = allSongs[index];
-        final isActive = currentSong?.id == song.id;
+        final isActive = currentSong?.identity == song.identity;
         return SongTile(
           song: song,
           isActive: isActive,
           isPlaying: isActive && isPlaying,
-          onTap: () => widget.onSongTap(song),
+          onTap: () => _onSongTap(song),
           onFavoriteTap: () => widget.onFavoriteTap(song),
         );
       },
@@ -227,7 +256,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildPlaylistsView(List<Playlist> playlists) {
     if (playlists.isEmpty) {
       return _buildEmptyState(
-          Icons.playlist_add_rounded, 'No playlists created yet');
+        Icons.playlist_add_rounded,
+        'No playlists created yet',
+      );
     }
     return GridView.builder(
       physics: const BouncingScrollPhysics(),
@@ -243,12 +274,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
         return GestureDetector(
           onTap: () {
             if (playlist.songs.isNotEmpty) {
-              widget.onSongTap(playlist.songs[0]);
+              _onSongTap(playlist.songs[0]);
             } else {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text(
-                      'This playlist is empty! Add songs from the catalog.'),
+                    'This playlist is empty! Add songs from the catalog.',
+                  ),
                   behavior: SnackBarBehavior.floating,
                 ),
               );
@@ -258,11 +290,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
-                child: AlbumArt(
-                  gradientId: playlist.gradientId,
-                  size: double.infinity,
-                  borderRadius: 12,
-                  overlayIcon: Icons.playlist_play_rounded,
+                child: LayoutBuilder(
+                  builder: (context, constraints) => AlbumArt(
+                    gradientId: playlist.gradientId,
+                    size: constraints.biggest.shortestSide,
+                    borderRadius: 12,
+                    overlayIcon: Icons.playlist_play_rounded,
+                  ),
                 ),
               ),
               const SizedBox(height: 8),
@@ -271,13 +305,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                    fontWeight: FontWeight.w600, fontSize: 13.5),
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13.5,
+                ),
               ),
               const SizedBox(height: 2),
               Text(
                 '${playlist.songs.length} songs',
                 style: const TextStyle(
-                    color: AppColors.textSecondary, fontSize: 11.5),
+                  color: AppColors.textSecondary,
+                  fontSize: 11.5,
+                ),
               ),
             ],
           ),
@@ -286,14 +324,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _buildAlbumsView(List<Song> songs) {
-    // Use cached map — recomputed only when the songs list reference changes,
-    // not on every isPlaying / position notifyListeners() call.
-    final albums = _getAlbumMap(songs);
+  Widget _buildAlbumsView() {
+    final albums = _albumMap;
     if (albums.isEmpty) {
       return _buildEmptyState(Icons.album_rounded, 'No albums found');
     }
-    final albumKeys = albums.keys.toList();
+    final albumKeys = _albumKeys;
     return GridView.builder(
       physics: const BouncingScrollPhysics(),
       itemCount: albumKeys.length,
@@ -307,16 +343,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
         final albumName = albumKeys[index];
         final albumSongs = albums[albumName]!;
         return GestureDetector(
-          onTap: () => widget.onSongTap(albumSongs[0]),
+          onTap: () => _onSongTap(albumSongs[0]),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
-                child: AlbumArt(
-                  gradientId: albumSongs[0].gradientId,
-                  size: double.infinity,
-                  borderRadius: 12,
-                  overlayIcon: Icons.album_rounded,
+                child: LayoutBuilder(
+                  builder: (context, constraints) => AlbumArt(
+                    gradientId: albumSongs[0].gradientId,
+                    size: constraints.biggest.shortestSide,
+                    borderRadius: 12,
+                    overlayIcon: Icons.album_rounded,
+                  ),
                 ),
               ),
               const SizedBox(height: 8),
@@ -325,7 +363,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                    fontWeight: FontWeight.w600, fontSize: 13.5),
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13.5,
+                ),
               ),
               const SizedBox(height: 2),
               Text(
@@ -333,7 +373,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                    color: AppColors.textSecondary, fontSize: 11.5),
+                  color: AppColors.textSecondary,
+                  fontSize: 11.5,
+                ),
               ),
             ],
           ),
@@ -343,48 +385,80 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildFavoritesList(
-      List<Song> allFavorites, Song? currentSong, bool isPlaying) {
+    List<Song> allFavorites,
+    Song? currentSong,
+    bool isPlaying,
+  ) {
     if (allFavorites.isEmpty) {
       return _buildEmptyState(
         Icons.favorite_outline_rounded,
         'No favorites yet',
-        subtitle: 'Tap the heart on any local or Jamendo song to add it here',
+        subtitle: 'Tap the heart on a song to add it here',
       );
     }
 
-    final localFavs =
-        allFavorites.where((s) => s.source == SongSource.local).toList();
-    final jamendoFavs =
-        allFavorites.where((s) => s.source == SongSource.jamendo).toList();
+    final localFavs = allFavorites
+        .where((s) => s.source == SongSource.local)
+        .toList();
+    final youtubeFavs = allFavorites
+        .where((s) => s.source == SongSource.youtube)
+        .toList();
+    final legacyFavs = allFavorites
+        .where((s) => s.source == SongSource.legacy)
+        .toList();
+    if (legacyFavs.isEmpty && _favoriteFilterIndex == 2) {
+      _favoriteFilterIndex = 0;
+    }
 
     final filtered = _favoriteFilterIndex == 1
         ? localFavs
         : _favoriteFilterIndex == 2
-            ? jamendoFavs
-            : allFavorites;
+        ? legacyFavs
+        : _favoriteFilterIndex == 3
+        ? youtubeFavs
+        : allFavorites;
 
     return Column(
       children: [
         SizedBox(
           height: 32,
-          child: Row(
+          child: ListView(
+            scrollDirection: Axis.horizontal,
             children: [
               _buildFavFilterChip('ALL (${allFavorites.length})', 0),
               const SizedBox(width: 8),
               _buildFavFilterChip('LOCAL (${localFavs.length})', 1),
               const SizedBox(width: 8),
-              _buildFavFilterChip('JAMENDO (${jamendoFavs.length})', 2),
+              _buildFavFilterChip('YOUTUBE (${youtubeFavs.length})', 3),
+              if (legacyFavs.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                _buildFavFilterChip(
+                  'Previous source (${legacyFavs.length})',
+                  2,
+                ),
+              ],
             ],
           ),
         ),
         const SizedBox(height: 12),
+        if (legacyFavs.isNotEmpty &&
+            (_favoriteFilterIndex == 0 || _favoriteFilterIndex == 2)) ...[
+          const Text(
+            'Previous-source favorites are saved but unavailable. '
+            'Search their title and artist in YouTube Music.',
+            style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+          ),
+          const SizedBox(height: 12),
+        ],
         Expanded(
           child: filtered.isEmpty
               ? _buildEmptyState(
                   Icons.favorite_border_rounded,
                   _favoriteFilterIndex == 1
                       ? 'No local favorite songs'
-                      : 'No Jamendo favorite songs',
+                      : _favoriteFilterIndex == 3
+                      ? 'No YouTube favorite songs'
+                      : 'No previous-source favorite songs',
                 )
               : ListView.builder(
                   physics: const BouncingScrollPhysics(),
@@ -394,12 +468,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       return const SizedBox(height: 130);
                     }
                     final song = filtered[index];
-                    final isActive = currentSong?.id == song.id;
+                    final isActive = currentSong?.identity == song.identity;
                     return SongTile(
                       song: song,
                       isActive: isActive,
                       isPlaying: isActive && isPlaying,
-                      onTap: () => widget.onSongTap(song),
+                      onTap: () => _onSongTap(song),
                       onFavoriteTap: () => widget.onFavoriteTap(song),
                     );
                   },
@@ -439,21 +513,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _buildEmptyState(IconData icon, String message,
-      {String? subtitle}) {
+  Widget _buildEmptyState(IconData icon, String message, {String? subtitle}) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon,
-              size: 52,
-              color: AppColors.textMuted.withValues(alpha: 0.4)),
+          Icon(
+            icon,
+            size: 52,
+            color: AppColors.textMuted.withValues(alpha: 0.4),
+          ),
           const SizedBox(height: 16),
           Text(
             message,
-            style: Theme.of(context)
-                .textTheme
-                .titleLarge
+            style: Theme.of(context).textTheme.titleLarge
                 ?.copyWith(color: AppColors.textSecondary, fontSize: 14.5),
           ),
           if (subtitle != null) ...[
@@ -461,9 +534,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             Text(
               subtitle,
               textAlign: TextAlign.center,
-              style: Theme.of(context)
-                  .textTheme
-                  .bodyMedium
+              style: Theme.of(context).textTheme.bodyMedium
                   ?.copyWith(color: AppColors.textMuted, fontSize: 12),
             ),
           ],
@@ -480,14 +551,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
       builder: (context) => AlertDialog(
         backgroundColor: AppColors.backgroundSurface,
         surfaceTintColor: Colors.transparent,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text(
           'New Playlist',
           style: TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold),
+            color: Colors.white,
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+          ),
         ),
         content: TextField(
           controller: textController,
@@ -495,11 +566,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
           style: const TextStyle(color: Colors.white, fontSize: 14),
           decoration: InputDecoration(
             hintText: 'Playlist name',
-            hintStyle:
-                const TextStyle(color: AppColors.textMuted, fontSize: 14),
+            hintStyle: const TextStyle(
+              color: AppColors.textMuted,
+              fontSize: 14,
+            ),
             enabledBorder: UnderlineInputBorder(
               borderSide: BorderSide(
-                  color: Colors.white.withValues(alpha: 0.2)),
+                color: Colors.white.withValues(alpha: 0.2),
+              ),
             ),
             focusedBorder: const UnderlineInputBorder(
               borderSide: BorderSide(color: AppColors.accent),
@@ -509,9 +583,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel',
-                style: TextStyle(
-                    color: AppColors.textSecondary, fontSize: 13)),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+            ),
           ),
           ElevatedButton(
             onPressed: () {
@@ -526,9 +601,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
               foregroundColor: Colors.white,
               elevation: 0,
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8)),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             ),
             child: const Text('Create', style: TextStyle(fontSize: 13)),
           ),

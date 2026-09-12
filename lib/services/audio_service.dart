@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 
@@ -10,11 +11,23 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import '../models/playlist.dart';
+import 'playback_failure.dart';
+import 'youtube_audio_resolver.dart' as youtube;
 
 class AudioService extends ChangeNotifier {
-  // ── Global song registry (populated by loaded online & local tracks) ─────────
+  // ── Song registry ──────────────────────────────────────────────────────────
   final List<Song> _songs = [];
+  final Map<String, int> _songIndices = {};
   List<Song> get songs => _songs;
+
+  // Lists retain their identity, so consumers must invalidate derived caches
+  // using these revisions rather than list identity or playback notifications.
+  int _catalogRevision = 0;
+  int get catalogRevision => _catalogRevision;
+  int _localSongsRevision = 0;
+  int get localSongsRevision => _localSongsRevision;
+  bool _disposed = false;
+  Future<void>? _scanFuture;
 
   late List<Playlist> _playlists;
   List<Playlist> get playlists => _playlists;
@@ -32,7 +45,23 @@ class AudioService extends ChangeNotifier {
   bool get isScanning => _isScanning;
 
   // ── Real audio player ────────────────────────────────────────────────────────
-  final AudioPlayer _player = AudioPlayer();
+  final AudioPlayer _player;
+  final Future<Uri> Function(String) _resolveYoutubeAudio;
+  Future<void> _playerMutations = Future<void>.value();
+  int _generation = 0;
+  int? _readyGeneration;
+  bool _isLoading = false;
+  bool get isLoading => _isLoading;
+  String? _playbackError;
+  String? get playbackError => _playbackError;
+  bool _wantsToPlay = false;
+  bool get wantsToPlay => _wantsToPlay;
+  bool get canSeek =>
+      !_disposed &&
+      _currentSong != null &&
+      !_isLoading &&
+      _playbackError == null &&
+      (_isSimulated(_currentSong!) || _readyGeneration == _generation);
 
   // ── Playback state (driven by the real player) ───────────────────────────────
   Song? _currentSong;
@@ -55,7 +84,7 @@ class AudioService extends ChangeNotifier {
   bool get repeatEnabled => _repeatEnabled;
 
   List<Song> _queue = [];
-  List<Song> get queue => _queue;
+  List<Song> get queue => UnmodifiableListView(_queue);
 
   int _currentQueueIndex = -1;
   int get currentQueueIndex => _currentQueueIndex;
@@ -64,8 +93,14 @@ class AudioService extends ChangeNotifier {
   StreamSubscription<PlayerState>? _playerStateSub;
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<void>? _playerCompleteSub;
+  StreamSubscription<PlaybackEvent>? _playbackErrorSub;
 
-  AudioService() {
+  AudioService({
+    Future<Uri> Function(String videoId)? resolveYoutubeAudio,
+    AudioPlayer? audioPlayer,
+  }) : _player = audioPlayer ?? AudioPlayer(),
+       _resolveYoutubeAudio =
+           resolveYoutubeAudio ?? youtube.resolveYoutubeAudio {
     _playlists = [
       Playlist(id: 0, name: "Favorites", songs: [], gradientId: 0),
       Playlist(id: 1, name: "Chill Vibes", songs: [], gradientId: 1),
@@ -81,6 +116,7 @@ class AudioService extends ChangeNotifier {
   Future<void> _loadFavorites() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (_disposed) return;
       final jsonList = prefs.getStringList(_prefsKeyFavorites) ?? [];
       _favorites = jsonList.map((str) {
         final map = json.decode(str) as Map<String, dynamic>;
@@ -102,34 +138,50 @@ class AudioService extends ChangeNotifier {
   Future<void> _saveFavorites() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final jsonList =
-          _favorites.map((s) => json.encode(s.toJson())).toList();
+      final jsonList = _favorites.map((s) => json.encode(s.toJson())).toList();
       await prefs.setStringList(_prefsKeyFavorites, jsonList);
     } catch (e) {
       debugPrint('[AUDIO_SERVICE] Error saving favorites: $e');
     }
   }
 
-  bool isSongFavorite(Song song) => _favorites.any((s) => s.id == song.id);
+  bool isSongFavorite(Song song) =>
+      _favorites.any((s) => s.identity == song.identity);
 
   void _syncFavoriteStates() {
-    final favIds = _favorites.map((s) => s.id).toSet();
+    final favIds = _favorites.map((s) => s.identity).toSet();
 
     for (int i = 0; i < _songs.length; i++) {
-      _songs[i] = _songs[i].copyWith(isFavorite: favIds.contains(_songs[i].id));
+      _songs[i] = _songs[i].copyWith(
+        isFavorite: favIds.contains(_songs[i].identity),
+      );
     }
     for (int i = 0; i < _localSongs.length; i++) {
-      _localSongs[i] =
-          _localSongs[i].copyWith(isFavorite: favIds.contains(_localSongs[i].id));
+      _localSongs[i] = _localSongs[i].copyWith(
+        isFavorite: favIds.contains(_localSongs[i].identity),
+      );
     }
     for (int i = 0; i < _queue.length; i++) {
-      _queue[i] =
-          _queue[i].copyWith(isFavorite: favIds.contains(_queue[i].id));
+      _queue[i] = _queue[i].copyWith(
+        isFavorite: favIds.contains(_queue[i].identity),
+      );
     }
     if (_currentSong != null) {
-      _currentSong = _currentSong!
-          .copyWith(isFavorite: favIds.contains(_currentSong!.id));
+      _currentSong = _currentSong!.copyWith(
+        isFavorite: favIds.contains(_currentSong!.identity),
+      );
     }
+    for (final playlist in _playlists.where((p) => p.id != 0)) {
+      for (var i = 0; i < playlist.songs.length; i++) {
+        final song = playlist.songs[i];
+        playlist.songs[i] = song.copyWith(
+          isFavorite: favIds.contains(song.identity),
+        );
+      }
+    }
+
+    _catalogRevision++;
+    _localSongsRevision++;
 
     // Sync playlist #0 (Favorites)
     final favPlaylist = _playlists.firstWhere((p) => p.id == 0);
@@ -137,259 +189,363 @@ class AudioService extends ChangeNotifier {
     favPlaylist.songs.addAll(_favorites);
   }
 
-  /// Register discovered/fetched online songs into global cache
+  /// Register tracks in input order; later metadata for an identity wins.
   void registerSongs(List<Song> newSongs) {
-    final favIds = _favorites.map((s) => s.id).toSet();
+    if (_disposed || newSongs.isEmpty) return;
+    _registerSongs(newSongs);
+    notifyListeners();
+  }
+
+  void _registerSongs(List<Song> newSongs) {
+    final favIds = _favorites.map((s) => s.identity).toSet();
     for (final song in newSongs) {
-      final idx = _songs.indexWhere((s) => s.id == song.id);
-      final synced = song.copyWith(isFavorite: favIds.contains(song.id));
-      if (idx == -1) {
+      final idx = _songIndices[song.identity];
+      final synced = song.copyWith(isFavorite: favIds.contains(song.identity));
+      if (idx == null) {
+        _songIndices[song.identity] = _songs.length;
         _songs.add(synced);
       } else {
         _songs[idx] = synced;
       }
     }
+    _catalogRevision++;
   }
 
-  // ── Player listener wiring ────────────────────────────────────────────────────
+  // Player events have no source ID. Ignore them until the selected generation
+  // has finished installing its source, including all stop/load transitions.
+  bool get _acceptPlayerEvents => !_disposed && _readyGeneration == _generation;
+
   void _attachPlayerListeners() {
     _playerStateSub = _player.playerStateStream.listen((state) {
-      final playing = state.playing;
-      if (playing != _isPlaying) {
-        _isPlaying = playing;
+      if (!_acceptPlayerEvents) return;
+      final loading =
+          state.processingState == ProcessingState.buffering ||
+          state.processingState == ProcessingState.loading;
+      if (state.playing != _isPlaying ||
+          state.playing != _wantsToPlay ||
+          loading != _isLoading) {
+        // Native notification controls/audio interruptions also change intent.
+        _wantsToPlay = state.playing;
+        _isPlaying = state.playing;
+        _isLoading = loading;
         notifyListeners();
       }
     });
-
+    _playbackErrorSub = _player.playbackEventStream.listen(
+      (_) {},
+      onError: (Object error) {
+        if (_acceptPlayerEvents) _failPlayback(_generation, error: error);
+      },
+    );
     _positionSub = _player.positionStream.listen((pos) {
+      if (!_acceptPlayerEvents) return;
       _playbackPosition = pos;
       playbackPositionNotifier.value = pos;
     });
-
     _playerCompleteSub = _player.processingStateStream
         .where((s) => s == ProcessingState.completed)
         .listen((_) {
-          debugPrint('[AUDIO_PLAYING] Track completed, advancing to next.');
+          if (!_acceptPlayerEvents || !_wantsToPlay) return;
           if (_repeatEnabled) {
-            _player.seek(Duration.zero).then((_) => _player.play());
+            unawaited(_restart(_generation));
           } else {
-            next();
+            unawaited(next());
           }
         });
   }
 
-  // ── Core playback ─────────────────────────────────────────────────────────────
-  Future<void> playSong(Song song, {List<Song>? contextQueue}) async {
-    debugPrint(
-      '[SONG_SELECTED] title="${song.title}" id=${song.id} source=${song.source} path="${song.audioPath}"',
-    );
+  bool _isCurrent(int generation) => !_disposed && generation == _generation;
 
-    // Register song in global song cache
-    registerSongs([song]);
+  // Only player mutations are serialized. A slow resolver never holds this lock.
+  Future<void> _mutatePlayer(Future<void> Function() action) {
+    final result = _playerMutations.then((_) => action());
+    _playerMutations = result.catchError((Object _) {});
+    return result;
+  }
 
-    // Update queue
-    if (contextQueue != null) {
-      _queue = List.from(contextQueue);
-      _currentQueueIndex = _queue.indexWhere((s) => s.id == song.id);
-      if (_currentQueueIndex == -1) {
-        _queue.add(song);
-        _currentQueueIndex = _queue.length - 1;
-      }
-    } else {
-      if (!_queue.any((s) => s.id == song.id)) {
-        _queue.add(song);
-      }
-      _currentQueueIndex = _queue.indexWhere((s) => s.id == song.id);
+  bool _isSimulated(Song song) =>
+      song.source == SongSource.local &&
+      (song.audioPath.isEmpty || song.audioPath.startsWith('simulated_'));
+
+  bool _canPlay(Song song) {
+    if (song.source == SongSource.youtube) {
+      return RegExp(r'^[a-zA-Z0-9_-]{11}$').hasMatch(song.videoId ?? '');
     }
+    if (song.source != SongSource.local) return false;
+    final path = song.audioPath;
+    return _isSimulated(song) ||
+        path.startsWith('content://') ||
+        path.startsWith('file://') ||
+        path.startsWith('/') ||
+        RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path);
+  }
 
-    _currentSong = song.copyWith(isFavorite: isSongFavorite(song));
-    _playbackPosition = Duration.zero;
-    playbackPositionNotifier.value = Duration.zero;
-    notifyListeners();
-
-    await _loadAndPlay(_currentSong!);
+  Future<void> playSong(Song song, {List<Song>? contextQueue}) async {
+    if (_disposed || !_canPlay(song)) return;
+    _registerSongs([song]);
+    if (contextQueue != null) {
+      _queue = contextQueue.where(_canPlay).toList();
+    }
+    _currentQueueIndex = _queue.indexWhere((s) => s.identity == song.identity);
+    if (_currentQueueIndex == -1) {
+      _queue.add(song);
+      _currentQueueIndex = _queue.length - 1;
+    }
+    await _selectSong(song);
   }
 
   Future<void> skipToIndex(int index) async {
-    if (_queue.isEmpty || index < 0 || index >= _queue.length) return;
-    if (_currentQueueIndex == index) return;
+    if (_disposed ||
+        index < 0 ||
+        index >= _queue.length ||
+        index == _currentQueueIndex ||
+        !_canPlay(_queue[index])) {
+      return;
+    }
     _currentQueueIndex = index;
-    _currentSong = _queue[index].copyWith(isFavorite: isSongFavorite(_queue[index]));
+    await _selectSong(_queue[index]);
+  }
+
+  Future<void> _selectSong(Song song) async {
+    final generation = ++_generation;
+    _readyGeneration = null;
+    _currentSong = song.copyWith(isFavorite: isSongFavorite(song));
+    _isPlaying = false;
+    _wantsToPlay = !_isSimulated(song);
+    _isLoading = !_isSimulated(song);
+    _playbackError = null;
     _playbackPosition = Duration.zero;
     playbackPositionNotifier.value = Duration.zero;
     notifyListeners();
-    await _loadAndPlay(_currentSong!);
-  }
 
-  Future<void> _loadAndPlay(Song song) async {
-    final path = song.audioPath;
-
-    if (path.isEmpty || path.startsWith('simulated_')) {
-      debugPrint('[AUDIO_SOURCE] Simulated/empty song detected. path="$path"');
-      return;
-    }
-
-    debugPrint('[AUDIO_SOURCE] uri="$path"');
-
+    // Stop the previous source immediately, even while resolution is pending.
+    final stopped =
+        _mutatePlayer(() async {
+          if (_isCurrent(generation)) await _player.stop();
+        }).catchError((Object error) {
+          _failPlayback(generation, error: error);
+        });
     try {
-      await _player.stop();
-
-      final mediaItem = MediaItem(
-        id: song.id.toString(),
-        album: song.album,
-        title: song.title,
-        artist: song.artist,
-        duration: song.duration > Duration.zero ? song.duration : null,
-        artUri: (song.albumArtUrl != null && song.albumArtUrl!.isNotEmpty)
-            ? Uri.tryParse(song.albumArtUrl!)
-            : null,
-      );
-
-      final AudioSource source;
-      if (path.startsWith('http://') || path.startsWith('https://')) {
-        // Online Jamendo MP3 stream — progressive HTTP streaming without full download
-        debugPrint('[AUDIO_LOADING] Loading online Jamendo HTTP stream: $path');
-        source = AudioSource.uri(Uri.parse(path), tag: mediaItem);
-      } else if (path.startsWith('content://')) {
-        // Android MediaStore content URI
-        debugPrint('[AUDIO_LOADING] Loading as content:// URI');
-        source = AudioSource.uri(Uri.parse(path), tag: mediaItem);
-      } else if (path.startsWith('/') || path.startsWith('file://')) {
-        // Absolute local file path
-        final fileUri = path.startsWith('file://')
-            ? Uri.parse(path)
-            : Uri.file(path);
-        debugPrint('[AUDIO_LOADING] Loading as file URI: $fileUri');
-        source = AudioSource.uri(fileUri, tag: mediaItem);
-      } else {
-        debugPrint('[AUDIO_ERROR] Unrecognised path format: "$path"');
+      if (_isSimulated(song)) {
+        await stopped;
         return;
       }
-
-      final duration = await _player.setAudioSource(source);
-      debugPrint('[AUDIO_READY] duration=$duration');
-
-      if (duration != null && duration > Duration.zero) {
-        final idx = _songs.indexWhere((s) => s.id == song.id);
-        if (idx != -1) {
-          _songs[idx] = _songs[idx].copyWith(duration: duration);
+      final Uri uri;
+      if (song.source == SongSource.youtube) {
+        uri = await _resolveYoutubeAudio(song.videoId!)
+            .timeout(const Duration(seconds: 20));
+        if (!_isCurrent(generation)) return;
+        if (uri.scheme != 'https' ||
+            uri.host.isEmpty ||
+            uri.userInfo.isNotEmpty) {
+          throw StateError('Invalid audio stream.');
         }
-        final localIdx = _localSongs.indexWhere((s) => s.id == song.id);
-        if (localIdx != -1) {
-          _localSongs[localIdx] =
-              _localSongs[localIdx].copyWith(duration: duration);
-        }
-        final qIdx = _queue.indexWhere((s) => s.id == song.id);
-        if (qIdx != -1) {
-          _queue[qIdx] = _queue[qIdx].copyWith(duration: duration);
-        }
-        _currentSong = song.copyWith(duration: duration);
-        notifyListeners();
+      } else {
+        final path = song.audioPath;
+        uri = path.startsWith('content://') || path.startsWith('file://')
+            ? Uri.parse(path)
+            : Uri.file(path, windows: RegExp(r'^[A-Za-z]:').hasMatch(path));
       }
-
-      await _player.play();
-      debugPrint('[AUDIO_PLAYING] "${song.title}" is now playing.');
-    } on PlayerException catch (e) {
-      debugPrint(
-        '[AUDIO_ERROR] PlayerException code=${e.code} message=${e.message}',
-      );
-    } on PlayerInterruptedException catch (e) {
-      debugPrint('[AUDIO_ERROR] PlayerInterruptedException: ${e.message}');
-    } catch (e, stack) {
-      debugPrint('[AUDIO_ERROR] Unexpected error: $e\n$stack');
+      await stopped;
+      if (!_isCurrent(generation) || _playbackError != null) return;
+      await _mutatePlayer(() async {
+        if (!_isCurrent(generation)) return;
+        final mediaItem = MediaItem(
+          id: song.identity,
+          album: song.album,
+          title: song.title,
+          artist: song.artist,
+          duration: song.duration > Duration.zero ? song.duration : null,
+          artUri: song.albumArtUrl?.isNotEmpty == true
+              ? Uri.tryParse(song.albumArtUrl!)
+              : null,
+        );
+        final duration = await _player.setAudioSource(
+          AudioSource.uri(uri, tag: mediaItem),
+        );
+        if (!_isCurrent(generation)) return;
+        if (duration != null && duration > Duration.zero) {
+          _updateDuration(song.identity, duration);
+        }
+        _readyGeneration = generation;
+        _isLoading = false;
+        notifyListeners();
+        if (_isCurrent(generation) && _wantsToPlay) _startPlaying(generation);
+      });
+    } catch (error) {
+      _failPlayback(generation, error: error);
     }
+  }
+
+  void _updateDuration(String identity, Duration duration) {
+    final idx = _songIndices[identity];
+    if (idx != null) {
+      _songs[idx] = _songs[idx].copyWith(duration: duration);
+      _catalogRevision++;
+    }
+    void update(List<Song> songs) {
+      for (var i = 0; i < songs.length; i++) {
+        if (songs[i].identity == identity) {
+          songs[i] = songs[i].copyWith(duration: duration);
+        }
+      }
+    }
+
+    if (_localSongs.any((song) => song.identity == identity)) {
+      update(_localSongs);
+      _localSongsRevision++;
+    }
+    update(_queue);
+    update(_favorites);
+    for (final playlist in _playlists) {
+      update(playlist.songs);
+    }
+    // Use current metadata, not the snapshot from before resolution/favoriting.
+    _currentSong = _currentSong!.copyWith(duration: duration);
+  }
+
+  void _failPlayback(int generation, {Object? error}) {
+    if (!_isCurrent(generation)) return;
+    _readyGeneration = null;
+    _isLoading = false;
+    _isPlaying = false;
+    _wantsToPlay = false;
+    final isYoutube = _currentSong?.source == SongSource.youtube;
+    _playbackError = isYoutube && kIsWeb
+        ? 'YouTube audio is not supported on the web.'
+        : classifyPlaybackFailure(error).message(isYoutube: isYoutube);
+    notifyListeners();
+    // Never print exceptions: player/network errors can include signed URLs.
+    unawaited(
+      _mutatePlayer(() async {
+        if (_isCurrent(generation)) await _player.stop();
+      }).catchError((Object _) {}),
+    );
+  }
+
+  void _startPlaying(int generation) {
+    if (!_isCurrent(generation) || !_wantsToPlay) return;
+    // just_audio's play future completes only when paused/stopped/completed.
+    unawaited(
+      Future<void>.sync(_player.play).catchError((Object error) {
+        _failPlayback(generation, error: error);
+      }),
+    );
+  }
+
+  Future<void> _restart(int generation) async {
+    try {
+      await _mutatePlayer(() async {
+        if (!_isCurrent(generation)) return;
+        await _player.seek(Duration.zero);
+        if (_isCurrent(generation) && _wantsToPlay) _startPlaying(generation);
+      });
+    } catch (error) {
+      _failPlayback(generation, error: error);
+    }
+  }
+
+  Future<void> retryPlayback() async {
+    if (_disposed || _currentSong == null || !_canPlay(_currentSong!)) return;
+    await _selectSong(_currentSong!);
   }
 
   Future<void> togglePlay() async {
-    if (_currentSong == null) return;
-
-    final path = _currentSong!.audioPath;
-    if (path.isEmpty || path.startsWith('simulated_')) {
-      _isPlaying = !_isPlaying;
+    if (_disposed || _currentSong == null || !_canPlay(_currentSong!)) return;
+    if (_isSimulated(_currentSong!)) {
+      _wantsToPlay = _isPlaying = !_isPlaying;
       notifyListeners();
       return;
     }
-
-    if (_player.playing) {
-      debugPrint('[AUDIO_PLAYING] Pausing "${_currentSong!.title}"');
-      await _player.pause();
-    } else {
-      if (_player.processingState == ProcessingState.idle ||
-          _player.processingState == ProcessingState.completed) {
-        await _loadAndPlay(_currentSong!);
-      } else {
-        debugPrint('[AUDIO_PLAYING] Resuming "${_currentSong!.title}"');
-        await _player.play();
-      }
+    if (_playbackError != null) {
+      await retryPlayback();
+      return;
+    }
+    _wantsToPlay = !_wantsToPlay;
+    if (!_wantsToPlay) _isPlaying = false;
+    notifyListeners();
+    if (_readyGeneration != _generation) return;
+    final generation = _generation;
+    try {
+      await _mutatePlayer(() async {
+        if (!_isCurrent(generation)) return;
+        if (!_wantsToPlay) {
+          await _player.pause();
+        } else if (_player.processingState == ProcessingState.completed) {
+          await _player.seek(Duration.zero);
+          if (_isCurrent(generation) && _wantsToPlay) _startPlaying(generation);
+        } else {
+          _startPlaying(generation);
+        }
+      });
+    } catch (error) {
+      _failPlayback(generation, error: error);
     }
   }
 
-  /// Stop playback entirely and dismiss the current song.
-  /// Clears [_currentSong] so the mini player / Now Playing have nothing
-  /// to show. The queue is kept so a fresh [playSong] call works normally.
+  /// Dismiss immediately and invalidate pending loads. Keep the queue for reuse.
   Future<void> stopAndClear() async {
-    try {
-      await _player.stop();
-    } catch (e) {
-      debugPrint('[AUDIO_ERROR] stopAndClear failed: $e');
-    }
+    if (_disposed) return;
+    final generation = ++_generation;
+    _readyGeneration = null;
     _currentSong = null;
     _currentQueueIndex = -1;
+    _isLoading = false;
+    _playbackError = null;
+    _wantsToPlay = false;
     _isPlaying = false;
     _playbackPosition = Duration.zero;
     playbackPositionNotifier.value = Duration.zero;
     notifyListeners();
+    try {
+      await _mutatePlayer(() async {
+        if (_isCurrent(generation)) await _player.stop();
+      });
+    } catch (_) {
+      // State remains cleared; do not leak platform error details.
+    }
   }
 
   Future<void> seek(Duration position) async {
-    if (_currentSong == null) return;
+    if (!canSeek) return;
+    final generation = _generation;
     _playbackPosition = position;
     playbackPositionNotifier.value = position;
-
-    final path = _currentSong!.audioPath;
-    if (path.isEmpty || path.startsWith('simulated_')) {
+    if (_isSimulated(_currentSong!)) {
       notifyListeners();
       return;
     }
-
-    await _player.seek(position);
+    try {
+      await _mutatePlayer(() async {
+        if (_isCurrent(generation) && canSeek) await _player.seek(position);
+      });
+    } catch (error) {
+      _failPlayback(generation, error: error);
+    }
   }
 
   Future<void> next() async {
-    if (_queue.isEmpty) return;
-    if (_shuffleEnabled) {
-      _currentQueueIndex = Random().nextInt(_queue.length);
-    } else {
-      _currentQueueIndex = (_currentQueueIndex + 1) % _queue.length;
-    }
-    _currentSong = _queue[_currentQueueIndex].copyWith(
-      isFavorite: isSongFavorite(_queue[_currentQueueIndex]),
-    );
-    _playbackPosition = Duration.zero;
-    playbackPositionNotifier.value = Duration.zero;
-    notifyListeners();
-    await _loadAndPlay(_currentSong!);
+    if (_disposed || _queue.isEmpty) return;
+    final index = _shuffleEnabled
+        ? Random().nextInt(_queue.length)
+        : (_currentQueueIndex + 1) % _queue.length;
+    if (!_canPlay(_queue[index])) return;
+    _currentQueueIndex = index;
+    await _selectSong(_queue[index]);
   }
 
   Future<void> previous() async {
-    if (_queue.isEmpty) return;
+    if (_disposed || _queue.isEmpty) return;
     if (_playbackPosition.inSeconds > 3) {
       await seek(Duration.zero);
       return;
     }
-    if (_shuffleEnabled) {
-      _currentQueueIndex = Random().nextInt(_queue.length);
-    } else {
-      _currentQueueIndex =
-          (_currentQueueIndex - 1 + _queue.length) % _queue.length;
-    }
-    _currentSong = _queue[_currentQueueIndex].copyWith(
-      isFavorite: isSongFavorite(_queue[_currentQueueIndex]),
-    );
-    _playbackPosition = Duration.zero;
-    playbackPositionNotifier.value = Duration.zero;
-    notifyListeners();
-    await _loadAndPlay(_currentSong!);
+    final index = _shuffleEnabled
+        ? Random().nextInt(_queue.length)
+        : (_currentQueueIndex - 1 + _queue.length) % _queue.length;
+    if (!_canPlay(_queue[index])) return;
+    _currentQueueIndex = index;
+    await _selectSong(_queue[index]);
   }
 
   void toggleShuffle() {
@@ -405,7 +561,7 @@ class AudioService extends ChangeNotifier {
   void toggleFavorite(Song song) {
     final isFav = isSongFavorite(song);
     if (isFav) {
-      _favorites.removeWhere((s) => s.id == song.id);
+      _favorites.removeWhere((s) => s.identity == song.identity);
     } else {
       _favorites.add(song.copyWith(isFavorite: true));
     }
@@ -428,38 +584,49 @@ class AudioService extends ChangeNotifier {
   }
 
   void addSongToPlaylist(Song song, Playlist playlist) {
-    if (!playlist.songs.any((s) => s.id == song.id)) {
+    if (!playlist.songs.any((s) => s.identity == song.identity)) {
       playlist.songs.add(song);
       notifyListeners();
     }
   }
 
   void removeSongFromPlaylist(Song song, Playlist playlist) {
-    playlist.songs.removeWhere((s) => s.id == song.id);
+    playlist.songs.removeWhere((s) => s.identity == song.identity);
     notifyListeners();
   }
 
   // ── Local storage scanning ────────────────────────────────────────────────────
-  Future<void> scanLocalSongs({bool forcePrompt = false}) async {
+  Future<void> scanLocalSongs({bool forcePrompt = false}) {
+    if (_disposed) return Future<void>.value();
+    return _scanFuture ??= Future<void>.microtask(
+      () => _scanLocalSongs(forcePrompt: forcePrompt),
+    ).whenComplete(() => _scanFuture = null);
+  }
+
+  Future<void> _scanLocalSongs({required bool forcePrompt}) async {
+    if (_disposed) return;
     _isScanning = true;
-    _localSongs = [];
+    // Keep the last successful snapshot if the refresh fails.
     notifyListeners();
 
     try {
       bool granted =
           await _platform.invokeMethod<bool>('checkPermission') ?? false;
 
+      if (_disposed) return;
       if (!granted || forcePrompt) {
         granted =
             await _platform.invokeMethod<bool>('requestPermission') ?? false;
       }
+      if (_disposed) return;
       debugPrint('[AUDIO_SOURCE] Storage permission granted=$granted');
 
       if (granted) {
         final List<dynamic>? songsData = await _platform
             .invokeMethod<List<dynamic>>('fetchLocalSongs');
+        if (_disposed) return;
         if (songsData != null) {
-          final favIds = _favorites.map((s) => s.id).toSet();
+          final favIds = _favorites.map((s) => s.identity).toSet();
           _localSongs = songsData.map((data) {
             final map = Map<String, dynamic>.from(data as Map);
             final int id = map['id'] as int;
@@ -474,10 +641,22 @@ class AudioService extends ChangeNotifier {
               audioPath: path,
               gradientId: id.abs(),
               source: SongSource.local,
-              isFavorite: favIds.contains(id),
+              isFavorite: favIds.contains('local:$id'),
             );
           }).toList();
-          registerSongs(_localSongs);
+          _localSongsRevision++;
+          // Drop removed local files without touching other source identities.
+          final localIds = _localSongs.map((song) => song.identity).toSet();
+          _songs.removeWhere(
+            (song) =>
+                song.source == SongSource.local &&
+                !localIds.contains(song.identity),
+          );
+          _songIndices.clear();
+          for (var i = 0; i < _songs.length; i++) {
+            _songIndices[_songs[i].identity] = i;
+          }
+          _registerSongs(_localSongs);
           debugPrint(
             '[AUDIO_SOURCE] Scanned ${_localSongs.length} local songs.',
           );
@@ -489,18 +668,26 @@ class AudioService extends ChangeNotifier {
       debugPrint('[AUDIO_ERROR] scanLocalSongs failed: $e\n$stack');
     } finally {
       _isScanning = false;
-      notifyListeners();
+      if (!_disposed) notifyListeners();
     }
   }
 
   // ── Cleanup ───────────────────────────────────────────────────────────────────
   @override
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    ++_generation;
+    _readyGeneration = null;
+    _isLoading = false;
+    _isPlaying = false;
+    _wantsToPlay = false;
     playbackPositionNotifier.dispose();
-    _playerStateSub?.cancel();
-    _positionSub?.cancel();
-    _playerCompleteSub?.cancel();
-    _player.dispose();
+    unawaited(_playerStateSub?.cancel());
+    unawaited(_positionSub?.cancel());
+    unawaited(_playerCompleteSub?.cancel());
+    unawaited(_playbackErrorSub?.cancel());
+    unawaited(_mutatePlayer(_player.dispose).catchError((Object _) {}));
     super.dispose();
   }
 }

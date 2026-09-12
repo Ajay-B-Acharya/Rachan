@@ -1,7 +1,6 @@
-enum SongSource {
-  local,
-  jamendo,
-}
+import 'youtube_video.dart';
+
+enum SongSource { local, legacy, youtube }
 
 class Song {
   final int id;
@@ -14,6 +13,7 @@ class Song {
   final int gradientId;
   final String? albumArtUrl;
   final SongSource source;
+  final String? videoId;
   final String? licenseUrl;
   final bool audioDownloadAllowed;
 
@@ -23,66 +23,57 @@ class Song {
     required this.artist,
     required this.album,
     required this.duration,
-    required this.audioPath,
+    required String audioPath,
     this.isFavorite = false,
     required this.gradientId,
     this.albumArtUrl,
     this.source = SongSource.local,
+    this.videoId,
     this.licenseUrl,
     this.audioDownloadAllowed = false,
-  });
+  }) : audioPath = source == SongSource.youtube ? '' : audioPath;
 
-  bool get isOnline => source == SongSource.jamendo;
-
-  factory Song.fromJamendo(Map<String, dynamic> json) {
-    final int rawId = int.tryParse(json['id']?.toString() ?? '0') ?? 0;
-    final int durationSec =
-        int.tryParse(json['duration']?.toString() ?? '0') ?? 0;
-    final String audioUrl = (json['audio'] as String?) ?? '';
-    final String? artUrl =
-        (json['image'] as String?) ?? (json['album_image'] as String?);
-    final String? licenseUrl =
-        (json['license_ccurl'] as String?)?.trim().isNotEmpty == true
-            ? json['license_ccurl'] as String
-            : null;
-    final bool audioDownloadAllowed = json['audiodownload_allowed'] == true;
-
+  factory Song.fromYoutube(YoutubeVideo video) {
+    // Stable artwork selection only; this hash is never used as track identity.
+    final gradient = video.id.codeUnits.fold<int>(
+      0,
+      (hash, unit) => (hash * 31 + unit) & 0x7fffffff,
+    );
     return Song(
-      id: rawId,
-      title: (json['name'] as String?)?.trim().isNotEmpty == true
-          ? json['name'] as String
-          : 'Unknown Track',
-      artist: (json['artist_name'] as String?)?.trim().isNotEmpty == true
-          ? json['artist_name'] as String
-          : 'Unknown Artist',
-      album: (json['album_name'] as String?)?.trim().isNotEmpty == true
-          ? json['album_name'] as String
-          : 'Jamendo Music',
-      duration: Duration(seconds: durationSec),
-      audioPath: audioUrl,
-      isFavorite: false,
-      gradientId: rawId.abs(),
-      albumArtUrl: artUrl,
-      source: SongSource.jamendo,
-      licenseUrl: licenseUrl,
-      audioDownloadAllowed: audioDownloadAllowed,
+      id: 0,
+      title: video.title,
+      artist: video.artist,
+      album: 'YouTube',
+      duration: video.duration,
+      audioPath: '',
+      gradientId: gradient,
+      albumArtUrl: video.thumbnailUrl,
+      source: SongSource.youtube,
+      videoId: video.id,
     );
   }
 
+  String get identity => source == SongSource.youtube
+      ? 'youtube:${videoId ?? ''}'
+      : '${source.name}:$id';
+
+  bool get isOnline => source != SongSource.local;
+
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'artist': artist,
-        'album': album,
-        'durationMs': duration.inMilliseconds,
-        'audioPath': audioPath,
-        'isFavorite': isFavorite,
-        'gradientId': gradientId,
-        'albumArtUrl': albumArtUrl,
-        'source': source.name,
-        'licenseUrl': licenseUrl,
-        'audioDownloadAllowed': audioDownloadAllowed,
-      };
+    'id': id,
+    'title': title,
+    'artist': artist,
+    'album': album,
+    'durationMs': duration.inMilliseconds,
+    'audioPath': source == SongSource.youtube ? '' : audioPath,
+    'isFavorite': isFavorite,
+    'gradientId': gradientId,
+    'albumArtUrl': albumArtUrl,
+    'source': source.name,
+    if (videoId != null) 'videoId': videoId,
+    'licenseUrl': licenseUrl,
+    'audioDownloadAllowed': audioDownloadAllowed,
+  };
 
   factory Song.fromJson(Map<String, dynamic> json) {
     return Song(
@@ -95,7 +86,14 @@ class Song {
       isFavorite: json['isFavorite'] as bool? ?? false,
       gradientId: json['gradientId'] as int? ?? 0,
       albumArtUrl: json['albumArtUrl'] as String?,
-      source: json['source'] == 'jamendo' ? SongSource.jamendo : SongSource.local,
+      // Missing source predates source tagging and represents a local file.
+      // Unknown nonlocal tags must never silently become playable local songs.
+      source: json['source'] == null || json['source'] == 'local'
+          ? SongSource.local
+          : json['source'] == 'youtube'
+          ? SongSource.youtube
+          : SongSource.legacy,
+      videoId: json['videoId'] as String?,
       licenseUrl: json['licenseUrl'] as String?,
       audioDownloadAllowed: json['audioDownloadAllowed'] as bool? ?? false,
     );
@@ -112,6 +110,7 @@ class Song {
     int? gradientId,
     String? albumArtUrl,
     SongSource? source,
+    String? videoId,
     String? licenseUrl,
     bool? audioDownloadAllowed,
   }) {
@@ -126,17 +125,19 @@ class Song {
       gradientId: gradientId ?? this.gradientId,
       albumArtUrl: albumArtUrl ?? this.albumArtUrl,
       source: source ?? this.source,
+      videoId: videoId ?? this.videoId,
       licenseUrl: licenseUrl ?? this.licenseUrl,
-      audioDownloadAllowed:
-          audioDownloadAllowed ?? this.audioDownloadAllowed,
+      audioDownloadAllowed: audioDownloadAllowed ?? this.audioDownloadAllowed,
     );
   }
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is Song && runtimeType == other.runtimeType && id == other.id;
+      other is Song &&
+          runtimeType == other.runtimeType &&
+          identity == other.identity;
 
   @override
-  int get hashCode => id.hashCode;
+  int get hashCode => identity.hashCode;
 }

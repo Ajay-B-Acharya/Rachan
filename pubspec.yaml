@@ -41,6 +41,7 @@ dependencies:
   just_audio_background: ^0.0.1-beta.17
   shared_preferences: ^2.5.5
   http: ^1.2.2
+  youtube_explode_dart: 3.1.0
 
 dev_dependencies:
   flutter_test:
@@ -66,6 +67,7 @@ flutter:
 
   assets:
     - assets/logo.png
+    - assets/brand_mark.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

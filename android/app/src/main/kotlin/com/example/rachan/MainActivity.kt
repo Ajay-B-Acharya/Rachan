@@ -1,10 +1,13 @@
 package com.example.rachan
 
 import android.Manifest
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.pm.PackageManager
 import android.database.Cursor
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import androidx.annotation.NonNull
 import androidx.core.app.ActivityCompat
@@ -12,6 +15,7 @@ import androidx.core.content.ContextCompat
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.Executors
 
 // audio_service (used by just_audio_background) requires the Activity to
 // extend AudioServiceActivity instead of FlutterActivity so it can bind to
@@ -19,11 +23,16 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : AudioServiceActivity() {
     private val CHANNEL = "com.example.harmoniq/local_music"
     private val PERMISSION_REQUEST_CODE = 1001
-    private var pendingResult: MethodChannel.Result? = null
+    private val pendingPermissionResults = mutableListOf<MethodChannel.Result>()
+    private val pendingScanResults = mutableSetOf<MethodChannel.Result>()
+    private val scanExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var musicChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        musicChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        musicChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "checkPermission" -> {
                     result.success(checkMusicPermission())
@@ -32,12 +41,12 @@ class MainActivity : AudioServiceActivity() {
                     result.success(checkAllPermissions())
                 }
                 "requestPermission", "requestAllPermissions" -> {
-                    pendingResult = result
-                    requestRequiredPermissions()
+                    pendingPermissionResults.add(result)
+                    if (pendingPermissionResults.size == 1) requestRequiredPermissions()
                 }
                 "fetchLocalSongs" -> {
                     if (checkMusicPermission()) {
-                        result.success(fetchLocalSongs())
+                        fetchLocalSongsAsync(result)
                     } else {
                         result.error("PERMISSION_DENIED", "Storage/Media permission is not granted", null)
                     }
@@ -92,8 +101,7 @@ class MainActivity : AudioServiceActivity() {
         }
 
         if (permissionsToRequest.isEmpty()) {
-            pendingResult?.success(true)
-            pendingResult = null
+            completePermissionRequests(true)
         } else {
             ActivityCompat.requestPermissions(
                 this, permissionsToRequest.toTypedArray(), PERMISSION_REQUEST_CODE
@@ -109,12 +117,51 @@ class MainActivity : AudioServiceActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == PERMISSION_REQUEST_CODE) {
             val storageGranted = checkMusicPermission()
-            pendingResult?.success(storageGranted)
-            pendingResult = null
+            completePermissionRequests(storageGranted)
         }
     }
 
-    private fun fetchLocalSongs(): List<Map<String, Any>> {
+    private fun completePermissionRequests(granted: Boolean) {
+        val results = pendingPermissionResults.toList()
+        pendingPermissionResults.clear()
+        results.forEach { it.success(granted) }
+    }
+
+    private fun fetchLocalSongsAsync(result: MethodChannel.Result) {
+        // Query and cursor traversal can be slow for large libraries. Use the
+        // application resolver so the worker does not need a live Activity.
+        val resolver = applicationContext.contentResolver
+        pendingScanResults.add(result)
+        scanExecutor.execute {
+            try {
+                val songs = fetchLocalSongs(resolver)
+                mainHandler.post {
+                    if (pendingScanResults.remove(result)) result.success(songs)
+                }
+            } catch (error: Exception) {
+                mainHandler.post {
+                    if (pendingScanResults.remove(result)) {
+                        val code = if (error is SecurityException) "PERMISSION_DENIED" else "SCAN_FAILED"
+                        result.error(code, error.message ?: "Unable to scan local music", null)
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        musicChannel?.setMethodCallHandler(null)
+        musicChannel = null
+        pendingScanResults.forEach {
+            it.error("ACTIVITY_DESTROYED", "Local music scan interrupted", null)
+        }
+        pendingScanResults.clear()
+        completePermissionRequests(false)
+        scanExecutor.shutdownNow()
+        super.onDestroy()
+    }
+
+    private fun fetchLocalSongs(resolver: ContentResolver): List<Map<String, Any>> {
         val songsList = mutableListOf<Map<String, Any>>()
 
         val uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
@@ -123,13 +170,12 @@ class MainActivity : AudioServiceActivity() {
             MediaStore.Audio.Media.TITLE,
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.ALBUM,
-            MediaStore.Audio.Media.DURATION,
-            MediaStore.Audio.Media.DATA
+            MediaStore.Audio.Media.DURATION
         )
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
         val sortOrder = "${MediaStore.Audio.Media.TITLE} ASC"
 
-        val cursor: Cursor? = contentResolver.query(uri, projection, selection, null, sortOrder)
+        val cursor: Cursor? = resolver.query(uri, projection, selection, null, sortOrder)
         cursor?.use {
             val idCol       = it.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
             val titleCol    = it.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
@@ -137,7 +183,7 @@ class MainActivity : AudioServiceActivity() {
             val albumCol    = it.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
             val durationCol = it.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
 
-            while (it.moveToNext()) {
+            while (!Thread.currentThread().isInterrupted && it.moveToNext()) {
                 val id       = it.getLong(idCol)
                 val title    = it.getString(titleCol)    ?: "Unknown Title"
                 val artist   = it.getString(artistCol)   ?: "Unknown Artist"
