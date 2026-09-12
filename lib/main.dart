@@ -17,7 +17,6 @@ import 'widgets/bottom_nav.dart';
 import 'widgets/mini_player.dart';
 import 'widgets/motion.dart';
 import 'models/song.dart';
-import 'models/youtube_video.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -139,27 +138,26 @@ class _MainContainerState extends State<MainContainer> {
     super.initState();
     _audioService = widget.audioService ?? AudioService();
     _pageController = PageController();
+    unawaited(_scanIfAllowed());
 
     _pages = [
       HomeScreen(
         onLocalTap: () => _onTabTap(3),
         onSearchTap: _openSearch,
-        onVideoTap: _playYoutube,
-        onVideoQueueTap: _playYoutubeQueue,
         audioService: _audioService,
         onSongTap: (song, [queue]) =>
             _playSong(song, contextQueue: queue ?? _audioService.songs),
         onPlaylistPlayTap: (playlist) {
-          if (playlist.songs.isNotEmpty) {
-            _playSong(playlist.songs[0], contextQueue: playlist.songs);
-          }
+          final local = playlist.songs
+              .where((song) => song.source != SongSource.legacy)
+              .toList();
+          if (local.isNotEmpty) _playSong(local.first, contextQueue: local);
         },
       ),
       SearchScreen(
         key: _searchKey,
-        onVideoTap: _playYoutube,
-        onVideoQueueTap: _playYoutubeQueue,
         audioService: _audioService,
+        onQueueTap: (song, queue) => _playSong(song, contextQueue: queue),
         onSongTap: (song) => _playSong(song, contextQueue: _audioService.songs),
         onFavoriteTap: _audioService.toggleFavorite,
       ),
@@ -177,6 +175,21 @@ class _MainContainerState extends State<MainContainer> {
         onScanTap: _audioService.scanLocalSongs,
       ),
     ];
+  }
+
+  Future<void> _scanIfAllowed() async {
+    try {
+      const channel = MethodChannel('com.example.harmoniq/local_music');
+      final allowed =
+          await channel.invokeMethod<bool>('checkPermission') ?? false;
+      if (mounted && allowed && _audioService.localSongs.isEmpty) {
+        await _audioService.scanLocalSongs();
+      }
+    } on PlatformException {
+      // Permissions can still be requested explicitly from the Local tab.
+    } on MissingPluginException {
+      // Device scanning is available on Android only.
+    }
   }
 
   @override
@@ -206,14 +219,15 @@ class _MainContainerState extends State<MainContainer> {
         SnackBar(
           content: const Text('This saved track is from the previous source.'),
           action: SnackBarAction(
-            label: 'Find on YouTube',
+            label: 'Search device',
             onPressed: () => _openSearch('${song.title} ${song.artist}'),
           ),
         ),
       );
       return;
     }
-    await _audioService.playSong(song, contextQueue: contextQueue);
+    unawaited(_audioService.playSong(song, contextQueue: contextQueue));
+    _openNowPlaying();
   }
 
   void _openSearch(String query) {
@@ -221,19 +235,6 @@ class _MainContainerState extends State<MainContainer> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _searchKey.currentState?.setQuery(query);
     });
-  }
-
-  void _playYoutube(YoutubeVideo video) => _playYoutubeQueue(video, [video]);
-
-  void _playYoutubeQueue(YoutubeVideo video, List<YoutubeVideo> videos) {
-    final song = Song.fromYoutube(video);
-    unawaited(
-      _audioService.playSong(
-        song,
-        contextQueue: videos.map(Song.fromYoutube).toList(),
-      ),
-    );
-    _openNowPlaying();
   }
 
   void _openNowPlaying() {

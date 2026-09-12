@@ -54,10 +54,12 @@ class SongTile extends StatelessWidget {
             ),
             leading: AlbumArt(
               gradientId: song.gradientId,
+              imageUrl: song.source == SongSource.online
+                  ? song.albumArtUrl
+                  : null,
               size: 48,
               borderRadius: 8,
               showShadow: false,
-              imageUrl: song.albumArtUrl,
             ),
             title: Row(
               children: [

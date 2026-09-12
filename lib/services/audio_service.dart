@@ -12,7 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/song.dart';
 import '../models/playlist.dart';
 import 'playback_failure.dart';
-import 'youtube_audio_resolver.dart' as youtube;
+import 'online_music_service.dart';
 
 class AudioService extends ChangeNotifier {
   // ── Song registry ──────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ class AudioService extends ChangeNotifier {
 
   // ── Real audio player ────────────────────────────────────────────────────────
   final AudioPlayer _player;
-  final Future<Uri> Function(String) _resolveYoutubeAudio;
+  final Future<Uri> Function(String) _resolveOnlineAudio;
   Future<void> _playerMutations = Future<void>.value();
   int _generation = 0;
   int? _readyGeneration;
@@ -61,7 +61,7 @@ class AudioService extends ChangeNotifier {
       _currentSong != null &&
       !_isLoading &&
       _playbackError == null &&
-      (_isSimulated(_currentSong!) || _readyGeneration == _generation);
+      _readyGeneration == _generation;
 
   // ── Playback state (driven by the real player) ───────────────────────────────
   Song? _currentSong;
@@ -96,11 +96,11 @@ class AudioService extends ChangeNotifier {
   StreamSubscription<PlaybackEvent>? _playbackErrorSub;
 
   AudioService({
-    Future<Uri> Function(String videoId)? resolveYoutubeAudio,
     AudioPlayer? audioPlayer,
+    Future<Uri> Function(String)? resolveOnlineAudio,
   }) : _player = audioPlayer ?? AudioPlayer(),
-       _resolveYoutubeAudio =
-           resolveYoutubeAudio ?? youtube.resolveYoutubeAudio {
+       _resolveOnlineAudio =
+           resolveOnlineAudio ?? OnlineMusicService.instance.streamUri {
     _playlists = [
       Playlist(id: 0, name: "Favorites", songs: [], gradientId: 0),
       Playlist(id: 1, name: "Chill Vibes", songs: [], gradientId: 1),
@@ -256,25 +256,20 @@ class AudioService extends ChangeNotifier {
 
   bool _isCurrent(int generation) => !_disposed && generation == _generation;
 
-  // Only player mutations are serialized. A slow resolver never holds this lock.
+  // Serialize source installs and controls; stale generations cannot start play.
   Future<void> _mutatePlayer(Future<void> Function() action) {
     final result = _playerMutations.then((_) => action());
     _playerMutations = result.catchError((Object _) {});
     return result;
   }
 
-  bool _isSimulated(Song song) =>
-      song.source == SongSource.local &&
-      (song.audioPath.isEmpty || song.audioPath.startsWith('simulated_'));
-
   bool _canPlay(Song song) {
-    if (song.source == SongSource.youtube) {
-      return RegExp(r'^[a-zA-Z0-9_-]{11}$').hasMatch(song.videoId ?? '');
+    if (song.source == SongSource.online) {
+      return Song.isValidProviderId(song.providerId);
     }
     if (song.source != SongSource.local) return false;
     final path = song.audioPath;
-    return _isSimulated(song) ||
-        path.startsWith('content://') ||
+    return path.startsWith('content://') ||
         path.startsWith('file://') ||
         path.startsWith('/') ||
         RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path);
@@ -311,14 +306,14 @@ class AudioService extends ChangeNotifier {
     _readyGeneration = null;
     _currentSong = song.copyWith(isFavorite: isSongFavorite(song));
     _isPlaying = false;
-    _wantsToPlay = !_isSimulated(song);
-    _isLoading = !_isSimulated(song);
+    _wantsToPlay = true;
+    _isLoading = true;
     _playbackError = null;
     _playbackPosition = Duration.zero;
     playbackPositionNotifier.value = Duration.zero;
     notifyListeners();
 
-    // Stop the previous source immediately, even while resolution is pending.
+    // Stop the previous source while resolving this generation's next source.
     final stopped =
         _mutatePlayer(() async {
           if (_isCurrent(generation)) await _player.stop();
@@ -326,22 +321,17 @@ class AudioService extends ChangeNotifier {
           _failPlayback(generation, error: error);
         });
     try {
-      if (_isSimulated(song)) {
-        await stopped;
-        return;
-      }
+      final path = song.audioPath;
       final Uri uri;
-      if (song.source == SongSource.youtube) {
-        uri = await _resolveYoutubeAudio(song.videoId!)
-            .timeout(const Duration(seconds: 20));
-        if (!_isCurrent(generation)) return;
+      if (song.source == SongSource.online) {
+        uri = await _resolveOnlineAudio(song.providerId!)
+            .timeout(const Duration(seconds: 10));
         if (uri.scheme != 'https' ||
             uri.host.isEmpty ||
             uri.userInfo.isNotEmpty) {
-          throw StateError('Invalid audio stream.');
+          throw const OnlineMusicException(OnlineMusicFailure.invalidTrack);
         }
       } else {
-        final path = song.audioPath;
         uri = path.startsWith('content://') || path.startsWith('file://')
             ? Uri.parse(path)
             : Uri.file(path, windows: RegExp(r'^[A-Za-z]:').hasMatch(path));
@@ -356,9 +346,7 @@ class AudioService extends ChangeNotifier {
           title: song.title,
           artist: song.artist,
           duration: song.duration > Duration.zero ? song.duration : null,
-          artUri: song.albumArtUrl?.isNotEmpty == true
-              ? Uri.tryParse(song.albumArtUrl!)
-              : null,
+          artUri: _artworkUri(song),
         );
         final duration = await _player.setAudioSource(
           AudioSource.uri(uri, tag: mediaItem),
@@ -375,6 +363,19 @@ class AudioService extends ChangeNotifier {
     } catch (error) {
       _failPlayback(generation, error: error);
     }
+  }
+
+  Uri? _artworkUri(Song song) {
+    final uri = Uri.tryParse(song.albumArtUrl ?? '');
+    if (uri == null) return null;
+    if (song.source == SongSource.online) {
+      return uri.scheme == 'https' &&
+              uri.host.isNotEmpty &&
+              uri.userInfo.isEmpty
+          ? uri
+          : null;
+    }
+    return uri.scheme == 'file' || uri.scheme == 'content' ? uri : null;
   }
 
   void _updateDuration(String identity, Duration duration) {
@@ -400,7 +401,7 @@ class AudioService extends ChangeNotifier {
     for (final playlist in _playlists) {
       update(playlist.songs);
     }
-    // Use current metadata, not the snapshot from before resolution/favoriting.
+    // Use current metadata, not the snapshot from before loading/favoriting.
     _currentSong = _currentSong!.copyWith(duration: duration);
   }
 
@@ -410,12 +411,14 @@ class AudioService extends ChangeNotifier {
     _isLoading = false;
     _isPlaying = false;
     _wantsToPlay = false;
-    final isYoutube = _currentSong?.source == SongSource.youtube;
-    _playbackError = isYoutube && kIsWeb
-        ? 'YouTube audio is not supported on the web.'
-        : classifyPlaybackFailure(error).message(isYoutube: isYoutube);
+    _playbackError = error is OnlineMusicException
+        ? error.message
+        : classifyPlaybackFailure(
+            error,
+            online: _currentSong?.source == SongSource.online,
+          ).message();
     notifyListeners();
-    // Never print exceptions: player/network errors can include signed URLs.
+    // Never print exceptions: platform errors can include private file paths.
     unawaited(
       _mutatePlayer(() async {
         if (_isCurrent(generation)) await _player.stop();
@@ -452,11 +455,6 @@ class AudioService extends ChangeNotifier {
 
   Future<void> togglePlay() async {
     if (_disposed || _currentSong == null || !_canPlay(_currentSong!)) return;
-    if (_isSimulated(_currentSong!)) {
-      _wantsToPlay = _isPlaying = !_isPlaying;
-      notifyListeners();
-      return;
-    }
     if (_playbackError != null) {
       await retryPlayback();
       return;
@@ -511,10 +509,6 @@ class AudioService extends ChangeNotifier {
     final generation = _generation;
     _playbackPosition = position;
     playbackPositionNotifier.value = position;
-    if (_isSimulated(_currentSong!)) {
-      notifyListeners();
-      return;
-    }
     try {
       await _mutatePlayer(() async {
         if (_isCurrent(generation) && canSeek) await _player.seek(position);

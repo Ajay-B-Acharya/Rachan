@@ -72,10 +72,12 @@ class MiniPlayer extends StatelessWidget {
                       tag: 'album-art-${song.identity}',
                       child: AlbumArt(
                         gradientId: song.gradientId,
+                        imageUrl: song.source == SongSource.online
+                            ? song.albumArtUrl
+                            : null,
                         size: 44,
                         borderRadius: 10,
                         showShadow: false,
-                        imageUrl: song.albumArtUrl,
                       ),
                     ),
                     const SizedBox(width: 12),

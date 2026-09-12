@@ -323,10 +323,12 @@ class _NowPlayingScreenState extends State<NowPlayingScreen> {
                               : 'album-art-${item.identity}-np-$index',
                           child: AlbumArt(
                             gradientId: item.gradientId,
+                            imageUrl: item.source == SongSource.online
+                                ? item.albumArtUrl
+                                : null,
                             size: artSize,
                             borderRadius: 16,
                             showShadow: false,
-                            imageUrl: item.albumArtUrl,
                           ),
                         ),
                       ),
@@ -388,8 +390,8 @@ class _NowPlayingScreenState extends State<NowPlayingScreen> {
         ),
         const SizedBox(height: 12),
         Text(
-          song.source == SongSource.youtube
-              ? 'YOUTUBE · AUDIO'
+          song.source == SongSource.online
+              ? 'AUDIUS · STREAMING'
               : 'FROM YOUR LIBRARY',
           style: const TextStyle(
             color: _muted,
@@ -726,10 +728,12 @@ class _NowPlayingScreenState extends State<NowPlayingScreen> {
                   selectedTileColor: _primary.withValues(alpha: 0.08),
                   leading: AlbumArt(
                     gradientId: song.gradientId,
+                    imageUrl: song.source == SongSource.online
+                        ? song.albumArtUrl
+                        : null,
                     size: 44,
                     borderRadius: 8,
                     showShadow: false,
-                    imageUrl: song.albumArtUrl,
                   ),
                   title: Text(
                     song.title,
@@ -792,10 +796,12 @@ class _NowPlayingScreenState extends State<NowPlayingScreen> {
                 children: [
                   AlbumArt(
                     gradientId: song.gradientId,
+                    imageUrl: song.source == SongSource.online
+                        ? song.albumArtUrl
+                        : null,
                     size: 52,
                     borderRadius: 8,
                     showShadow: false,
-                    imageUrl: song.albumArtUrl,
                   ),
                   const SizedBox(width: 16),
                   Expanded(

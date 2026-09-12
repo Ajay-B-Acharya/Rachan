@@ -1,74 +1,69 @@
 # Harmoniq
 
-A Flutter music player with native audio controls for local files and online YouTube audio.
+Online music discovery and native audio playback, alongside your local Android library. No YouTube, extraction tools, WebView player, or self-hosted backend.
 
-## Listening
+## Download for Android
 
-1. Tap **Find your next song**, choose a mood, or open Search.
-2. Search for a song/artist, or paste a YouTube/YouTube Music link.
-3. Select a result. Harmoniq opens its own Now Playing screen with artwork, queue, seek, favorite, shuffle/repeat and play/pause controls.
+**[Download the latest Harmoniq APK](https://github.com/Ajay-B-Acharya/Rachan/raw/refs/heads/feat/audius-streaming-download/downloads/harmoniq-latest.apk)**
 
-There is no embedded video, hidden WebView, or external YouTube app handoff. The search result list becomes the queue. Online and local tracks use the same `just_audio` engine and Android background-media integration.
+Version **1.0.0+1** · Android · **53.3 MiB** · Updated **September 12, 2026**
 
-## How online playback works
+This build includes Audius online streaming and local music playback. Download it on your Android phone, open the APK, and allow installation from your browser/file manager if prompted. Only install APKs from a source you trust.
 
-- Search uses public metadata via `youtube_explode_dart` without a key on native platforms, or the official YouTube Data API when configured.
-- At playback time, the resolver requests an audio-only stream manifest using the library's standard API. MP4 audio is preferred where available, otherwise another audio-only stream is selected.
-- Resolved signed URLs are temporary. They are never persisted in songs/favorites or printed in logs; retry resolves a fresh URL.
-- Loading and playback errors are visible. Pause while loading is respected; skip/stop/dispose invalidate older requests so stale work cannot restart playback.
-- YouTube song IDs remain strings, separate from local numeric IDs, preventing queue/catalog/favorite collisions.
+**Development build:** the APK uses the project's development signing key, not a production release key. If Android reports a signing conflict with an existing installation, uninstalling it will remove app-local settings and favorites; back up anything important first.
 
-**This playback integration is unofficial.** It is not the YouTube Music API or a Premium integration. Streams may fail because of service changes, expired links, regional/age restrictions, throttling or authentication requirements. No user cookies, credentials, proxies, custom challenge solvers, or additional bypass mechanisms are configured. The third-party package has its own default request identities and retry behavior. No video fallback is used. Review provider terms and media rights before distributing or using online features commercially.
+[Browse the APK](downloads/harmoniq-latest.apk) · [Verify SHA-256](downloads/harmoniq-latest.apk.sha256)
 
-### Known playback blocker (2026-09-12)
+## Listen online
 
-The reported Proximity track `SMs0GnYze34` currently fails audio delivery with HTTP 403. A manifest can resolve even when its media cannot be fetched. The MP4 library download produced zero bytes before the deadline. A WebM prefix request returned 206, but both a subsequent full request and a first full request from a fresh manifest returned 403 with zero bytes. Therefore neither format switching nor temporary-file buffering has been validated as a fix. The app now distinguishes provider denial when the Dart error payload includes an HTTP status, without exposing signed URLs. The installed just_audio Android plugin often logs HTTP 403 natively but forwards only `Source error` to Dart; those cases correctly remain generic rather than inventing a cause. Do not treat passing unit tests, a successful build, or a small prefix download as proof of working YouTube audio playback.
+- Home shows trending public tracks from **Audius**.
+- Search a song, artist or genre, then tap **Search online** (or the keyboard search action).
+- Select a track to play it in Harmoniq's native Now Playing screen. Results become the queue.
+- Use play/pause, seek, next/previous, shuffle, repeat, favorites, playlists and the mini-player. Android background media controls use the same audio engine.
+- The Local tab retains device scanning and offline playback.
 
-## Run
+**Catalog:** Audius artist/community music, including original independent music, mixes and edits. This is a Spotify-style player experience, not Spotify's licensed catalog; not every mainstream recording will be available.
+
+## Supported streaming source
+
+The app uses Audius's documented REST API: trending/search/details, and `/v1/tracks/{id}/stream`. Public endpoints support anonymous read access with `app_name=Harmoniq`. An optional client-safe API key may improve rate limits:
+
+```sh
+flutter run --dart-define=AUDIUS_API_KEY=YOUR_PUBLIC_API_KEY
+```
+
+No key is bundled by default. Never put a bearer token or private signing key in the app. Optional `api_key` uses the official SDK's query convention, not a guessed auth header. URLs containing keys or CDN signatures are not logged or persisted in Song metadata.
+
+Only explicitly streamable, available, public, ungated full tracks are shown. Deleted, unlisted, gated and preview-only entries are excluded. Availability is rechecked before playback. The native player follows the official stream endpoint's CDN redirects; there is no scraping, stream extraction, download feature or third-party proxy.
+
+Source references:
+- [Audius API specification](https://api.audius.co/v1/swagger.yaml)
+- [Audius documentation](https://docs.audius.co/)
+
+Live development checks retrieved a complete 9,013,650-byte MP3 and verified a 65,536-byte midpoint range against the original file. Other requests encountered slow responses or transient access failures, so error/retry states remain important. A release-mode smoke check on the connected Moto g45 5G (Android 15) subsequently passed native playback progression, seeking to 60 seconds, pause and resume using the production AudioService. The complete Harmoniq app was rebuilt after the temporary test entry point; this spot check does not guarantee every catalog item or network.
+
+## Local music and saved data
+
+Open **Local**, grant music access and scan your device. Scanning runs off the Android UI thread; local search is immediate and lazy-built. Old removed-source favorites remain unavailable legacy records, distinct from Audius records, rather than silently mapping to different songs.
+
+## Develop / build
 
 ```sh
 flutter pub get
 flutter run
-```
-
-Optional official **metadata** API mode (does not grant official audio-stream access):
-
-```sh
-flutter run --dart-define=YOUTUBE_API_KEY=YOUR_RESTRICTED_KEY
-flutter build apk --release --dart-define=YOUTUBE_API_KEY=YOUR_RESTRICTED_KEY
-```
-
-Enable YouTube Data API v3 in Google Cloud. Never commit a real key. Client `dart-define` values are bundled and are not secrets; apply suitable application/API restrictions, quota limits, or use an authenticated backend for production credential protection.
-
-## Platforms
-
-- **Android:** primary target; local MediaStore scanning, native online audio and media notifications.
-- **Web:** UI preview and optional official metadata search; online audio resolution is explicitly unsupported due to browser/network restrictions. No iframe or public CORS proxy fallback.
-- **iOS/macOS:** source-resolution code is native-compatible but platform audio/signing/network configuration is unverified here.
-- **Windows/Linux:** metadata resolution can run, but this project does not include an appropriate `just_audio` desktop backend. A successful source request is not native playback support.
-
-Windows Flutter plugin development may require symlink support. The project does not change machine settings automatically.
-
-## Existing library
-
-Local scanning remains off the Android UI thread, lists remain lazy/cached, and progress updates are isolated from full-screen rebuilds. Saved favorites from the removed Jamendo source remain unavailable legacy metadata, not silently deleted or converted into unrelated YouTube tracks.
-
-## Checks
-
-```sh
 flutter analyze
 flutter test
 flutter build apk --release
-flutter build web --release
 ```
 
-Tests cover source-aware identity/serialization, temporary URL exclusion, resolver failure/races, loading/pause/stop/retry, queues, local scanning, search routing, responsive layouts and reduced motion. Tests use fake transports/players; distinguish these from live device playback verification.
+Android is the primary tested build target. Web can preview UI and use public streaming subject to browser CORS/autoplay; it cannot use the Android local scanner. Other platform folders remain scaffolding; signing, networking and native audio support require platform-specific validation.
 
-## Main components
+## Key files
 
-- `youtube_catalog.dart`: metadata discovery and bounded caching.
-- `youtube_audio_resolver.dart`: native/stub audio-resolution boundary.
-- `audio_service.dart`: shared native playback, queue and library state.
-- `now_playing_screen.dart` / `mini_player.dart`: native audio UI.
+- `lib/services/online_music_service.dart`: supported API, eligibility checks, bounded metadata cache and safe errors.
+- `lib/services/audio_service.dart`: native local/online playback, queue, favorites, scanning and loading state.
+- `lib/models/song.dart`: source-aware identity; no persisted temporary media links.
+- `lib/screens/`: discovery, search, library and native player.
+- `test/`: API eligibility, playback races, local regression and responsive UI tests.
 
-Harmoniq is independent and is not affiliated with or endorsed by YouTube or Google.
+No fake songs, simulated playback, or backend tokens are needed. Release signing still uses the development key; configure production signing and review source terms before publication. Harmoniq is not affiliated with Audius or Spotify.

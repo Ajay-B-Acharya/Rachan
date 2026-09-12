@@ -28,7 +28,7 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen> {
   int _selectedCategoryIndex = 0;
   int _favoriteFilterIndex =
-      0; // 0 = All, 1 = Local, 2 = Previous source, 3 = YouTube
+      0; // 0 = All, 1 = Local, 2 = Previous source, 3 = Online
   final List<String> _categories = [
     'Songs',
     'Playlists',
@@ -215,8 +215,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          'Previous source unavailable. Search for "${song.title}" '
-          'by ${song.artist} in YouTube Music.',
+          'Previous source unavailable. "${song.title}" by ${song.artist} '
+          'is saved for reference and cannot be played.',
         ),
         behavior: SnackBarBehavior.floating,
       ),
@@ -253,6 +253,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  Song _firstPlayableOrSaved(List<Song> songs) => songs.firstWhere(
+    (song) => song.source != SongSource.legacy,
+    orElse: () => songs.first,
+  );
+
   Widget _buildPlaylistsView(List<Playlist> playlists) {
     if (playlists.isEmpty) {
       return _buildEmptyState(
@@ -271,10 +276,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
       itemBuilder: (context, index) {
         final playlist = playlists[index];
+        final firstSong = playlist.songs.isEmpty
+            ? null
+            : _firstPlayableOrSaved(playlist.songs);
         return GestureDetector(
           onTap: () {
-            if (playlist.songs.isNotEmpty) {
-              _onSongTap(playlist.songs[0]);
+            if (firstSong != null) {
+              _onSongTap(firstSong);
             } else {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
@@ -293,6 +301,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 child: LayoutBuilder(
                   builder: (context, constraints) => AlbumArt(
                     gradientId: playlist.gradientId,
+                    imageUrl: firstSong?.source == SongSource.online
+                        ? firstSong?.albumArtUrl
+                        : null,
                     size: constraints.biggest.shortestSide,
                     borderRadius: 12,
                     overlayIcon: Icons.playlist_play_rounded,
@@ -342,15 +353,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
       itemBuilder: (context, index) {
         final albumName = albumKeys[index];
         final albumSongs = albums[albumName]!;
+        final firstSong = _firstPlayableOrSaved(albumSongs);
         return GestureDetector(
-          onTap: () => _onSongTap(albumSongs[0]),
+          onTap: () => _onSongTap(firstSong),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
                 child: LayoutBuilder(
                   builder: (context, constraints) => AlbumArt(
-                    gradientId: albumSongs[0].gradientId,
+                    gradientId: firstSong.gradientId,
+                    imageUrl: firstSong.source == SongSource.online
+                        ? firstSong.albumArtUrl
+                        : null,
                     size: constraints.biggest.shortestSide,
                     borderRadius: 12,
                     overlayIcon: Icons.album_rounded,
@@ -369,7 +384,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ),
               const SizedBox(height: 2),
               Text(
-                albumSongs[0].artist,
+                firstSong.artist,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
@@ -390,6 +405,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     bool isPlaying,
   ) {
     if (allFavorites.isEmpty) {
+      _favoriteFilterIndex = 0;
       return _buildEmptyState(
         Icons.favorite_outline_rounded,
         'No favorites yet',
@@ -400,23 +416,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final localFavs = allFavorites
         .where((s) => s.source == SongSource.local)
         .toList();
-    final youtubeFavs = allFavorites
-        .where((s) => s.source == SongSource.youtube)
-        .toList();
     final legacyFavs = allFavorites
         .where((s) => s.source == SongSource.legacy)
         .toList();
-    if (legacyFavs.isEmpty && _favoriteFilterIndex == 2) {
+    final onlineFavs = allFavorites
+        .where((s) => s.source == SongSource.online)
+        .toList();
+    if ((legacyFavs.isEmpty && _favoriteFilterIndex == 2) ||
+        (onlineFavs.isEmpty && _favoriteFilterIndex == 3)) {
       _favoriteFilterIndex = 0;
     }
 
-    final filtered = _favoriteFilterIndex == 1
-        ? localFavs
-        : _favoriteFilterIndex == 2
-        ? legacyFavs
-        : _favoriteFilterIndex == 3
-        ? youtubeFavs
-        : allFavorites;
+    final filtered = switch (_favoriteFilterIndex) {
+      1 => localFavs,
+      2 => legacyFavs,
+      3 => onlineFavs,
+      _ => allFavorites,
+    };
 
     return Column(
       children: [
@@ -428,8 +444,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
               _buildFavFilterChip('ALL (${allFavorites.length})', 0),
               const SizedBox(width: 8),
               _buildFavFilterChip('LOCAL (${localFavs.length})', 1),
-              const SizedBox(width: 8),
-              _buildFavFilterChip('YOUTUBE (${youtubeFavs.length})', 3),
+              if (onlineFavs.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                _buildFavFilterChip('ONLINE (${onlineFavs.length})', 3),
+              ],
               if (legacyFavs.isNotEmpty) ...[
                 const SizedBox(width: 8),
                 _buildFavFilterChip(
@@ -444,8 +462,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
         if (legacyFavs.isNotEmpty &&
             (_favoriteFilterIndex == 0 || _favoriteFilterIndex == 2)) ...[
           const Text(
-            'Previous-source favorites are saved but unavailable. '
-            'Search their title and artist in YouTube Music.',
+            'Previous-source favorites are saved for reference but unavailable '
+            'for playback.',
             style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
           ),
           const SizedBox(height: 12),
@@ -456,8 +474,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   Icons.favorite_border_rounded,
                   _favoriteFilterIndex == 1
                       ? 'No local favorite songs'
-                      : _favoriteFilterIndex == 3
-                      ? 'No YouTube favorite songs'
                       : 'No previous-source favorite songs',
                 )
               : ListView.builder(

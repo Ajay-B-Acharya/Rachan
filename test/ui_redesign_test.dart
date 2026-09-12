@@ -5,7 +5,6 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harmoniq/models/song.dart';
 import 'package:harmoniq/models/playlist.dart';
-import 'package:harmoniq/models/youtube_video.dart';
 import 'package:harmoniq/screens/library_screen.dart';
 import 'package:harmoniq/screens/local_screen.dart';
 import 'package:harmoniq/widgets/song_tile.dart';
@@ -13,6 +12,7 @@ import 'package:harmoniq/screens/home_screen.dart';
 import 'package:harmoniq/screens/now_playing_screen.dart';
 import 'package:harmoniq/services/audio_service.dart';
 import 'package:harmoniq/theme/app_theme.dart';
+import 'package:harmoniq/widgets/album_art.dart';
 import 'package:harmoniq/widgets/bottom_nav.dart';
 import 'package:harmoniq/widgets/mini_player.dart';
 import 'package:harmoniq/widgets/motion.dart';
@@ -35,18 +35,19 @@ Song _track(int id, {bool longMetadata = false}) => Song(
   gradientId: id,
 );
 
-Song _youtubeTrack(String videoId, {bool longMetadata = false}) {
-  final metadata = _track(0, longMetadata: longMetadata);
-  return Song.fromYoutube(
-    YoutubeVideo(
-      id: videoId,
-      title: longMetadata ? metadata.title : 'YouTube $videoId',
-      artist: metadata.artist,
-      thumbnailUrl: '',
-      duration: metadata.duration,
-    ),
-  );
-}
+Song _legacyTrack(int id) => _track(id).copyWith(
+  source: SongSource.legacy,
+  title: 'Saved track $id',
+  album: 'Saved album $id',
+);
+
+Song _onlineTrack(int id, {String? imageUrl}) => _track(id).copyWith(
+  source: SongSource.online,
+  providerId: 'track$id',
+  title: 'Online track $id',
+  album: 'Online album $id',
+  albumArtUrl: imageUrl,
+);
 
 /// Keeps the real ChangeNotifier contract, but never invokes player playback.
 class _FakeAudioService extends AudioService {
@@ -89,6 +90,11 @@ class _FakeAudioService extends AudioService {
   List<Song> get favorites => testFavorites;
   @override
   List<Playlist> get playlists => testPlaylists;
+
+  void updateFavorites(List<Song> favorites) {
+    testFavorites = favorites;
+    notifyListeners();
+  }
 
   void updatePlayback({
     required bool isLoading,
@@ -203,7 +209,7 @@ void main() {
           _app(
             HomeScreen(
               audioService: service,
-              youtubeConfigured: false,
+              loadOnlineTracks: () async => [],
               onSongTap: (_, [queue]) {},
               onPlaylistPlayTap: (_) {},
               onLocalTap: () => localTaps++,
@@ -213,16 +219,16 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
-        expect(find.textContaining('next obsession.'), findsOneWidget);
+        expect(find.text('Press play.\nBe here.'), findsOneWidget);
         await tester.scrollUntilVisible(
-          find.text('The offline collection'),
+          find.text('Your offline collection'),
           200,
           scrollable: find.byType(Scrollable).first,
         );
         await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text('The offline collection'));
+        await tester.ensureVisible(find.text('Your offline collection'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('The offline collection'));
+        await tester.tap(find.text('Your offline collection'));
         await tester.pumpAndSettle();
         expect(localTaps, 1);
         expect(tester.takeException(), isNull);
@@ -232,6 +238,278 @@ void main() {
       }
     });
   }
+
+  testWidgets('album art rejects non-HTTPS URLs and retains its gradient', (
+    tester,
+  ) async {
+    for (final url in [
+      null,
+      '',
+      'http://example.test/art.jpg',
+      'file:///art.jpg',
+      '//example.test/art.jpg',
+      'https:///art.jpg',
+    ]) {
+      await tester.pumpWidget(_app(AlbumArt(gradientId: 0, imageUrl: url)));
+      expect(find.byType(Image), findsNothing);
+      expect(find.byIcon(Icons.music_note_rounded), findsOneWidget);
+    }
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('HTTPS artwork caps decode size and falls back on failure', (
+    tester,
+  ) async {
+    for (final size in [48.0, 900.0]) {
+      await tester.pumpWidget(
+        _app(
+          MediaQuery(
+            data: const MediaQueryData(devicePixelRatio: 2),
+            child: Center(
+              child: AlbumArt(
+                gradientId: 0,
+                size: size,
+                imageUrl: 'https://example.test/art-$size.jpg',
+              ),
+            ),
+          ),
+        ),
+      );
+      final image = tester.widget<Image>(find.byType(Image));
+      final provider = image.image as ResizeImage;
+      expect(provider.width, size == 48 ? 96 : 1200);
+      expect(
+        (provider.imageProvider as NetworkImage).url,
+        'https://example.test/art-$size.jpg',
+      );
+      expect(image.fit, BoxFit.cover);
+      expect(
+        image.errorBuilder!(
+          tester.element(find.byType(Image)),
+          Exception('unavailable'),
+          null,
+        ),
+        isA<SizedBox>(),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.music_note_rounded), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('artwork fades only when motion is enabled', (tester) async {
+    for (final media in [
+      const MediaQueryData(),
+      const MediaQueryData(disableAnimations: true),
+      const MediaQueryData(accessibleNavigation: true),
+    ]) {
+      await tester.pumpWidget(
+        _app(
+          MediaQuery(
+            data: media,
+            child: const AlbumArt(
+              gradientId: 0,
+              imageUrl: 'https://example.test/fade.jpg',
+            ),
+          ),
+        ),
+      );
+      final finder = find.byType(Image);
+      final image = tester.widget<Image>(finder);
+      final context = tester.element(finder);
+      const child = SizedBox(key: ValueKey('decoded-art'));
+      final loading = image.frameBuilder!(context, child, null, false);
+      final loaded = image.frameBuilder!(context, child, 0, false);
+      if (media.disableAnimations || media.accessibleNavigation) {
+        expect(loading, isA<SizedBox>());
+        expect(loaded, same(child));
+      } else {
+        expect((loading as AnimatedOpacity).opacity, 0);
+        expect((loaded as AnimatedOpacity).opacity, 1);
+        expect(loaded.duration, const Duration(milliseconds: 220));
+      }
+      expect(image.frameBuilder!(context, child, 0, true), same(child));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('only online songs forward artwork to tiles and mini player', (
+    tester,
+  ) async {
+    const url = 'https://example.test/source-art.jpg';
+    for (final song in [
+      _track(0).copyWith(albumArtUrl: url),
+      _legacyTrack(0).copyWith(albumArtUrl: url),
+      _onlineTrack(0, imageUrl: url),
+    ]) {
+      await tester.pumpWidget(
+        _app(
+          Scaffold(
+            body: SongTile(song: song, onTap: () {}, onFavoriteTap: () {}),
+            bottomNavigationBar: MiniPlayer(
+              song: song,
+              isPlaying: false,
+              positionNotifier: service.playbackPositionNotifier,
+              onTap: () {},
+              onPlayPauseTap: () async {},
+              onNextTap: () async {},
+            ),
+          ),
+        ),
+      );
+      final artwork = tester.widgetList<AlbumArt>(find.byType(AlbumArt));
+      expect(artwork, hasLength(2));
+      expect(
+        artwork.map((art) => art.imageUrl),
+        everyElement(song.source == SongSource.online ? url : isNull),
+      );
+      expect(
+        find.byType(Image),
+        song.source == SongSource.online ? findsNWidgets(2) : findsNothing,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'online full player uses streaming label and service seek state',
+    (tester) async {
+      await _viewport(tester, const Size(400, 1000));
+      const url = 'https://example.test/online-art.jpg';
+      final online = _onlineTrack(0, imageUrl: url);
+      service.testQueue = [online];
+      service.index = 0;
+      service.loading = true;
+      service.playIntent = true;
+      await tester.pumpWidget(
+        _app(NowPlayingScreen(audioService: service, onClose: () {})),
+      );
+      expect(find.text('AUDIUS · STREAMING'), findsOneWidget);
+      expect(find.text('FROM YOUR LIBRARY'), findsNothing);
+      expect(tester.widget<AlbumArt>(find.byType(AlbumArt)).imageUrl, url);
+      expect(
+        tester.widget<Hero>(find.byType(Hero)).tag,
+        'album-art-online:audius:track0',
+      );
+      expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
+      service.updatePlayback(isLoading: false, wantsToPlay: false);
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(Slider), const Offset(60, 0));
+      await tester.pumpAndSettle();
+      expect(service.seekRequests, isNotEmpty);
+      service.updatePlayback(
+        isLoading: false,
+        wantsToPlay: false,
+        playbackError: 'The stream is unavailable. Try again.',
+      );
+      await tester.pumpAndSettle();
+      expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
+      await tester.tap(find.text('Retry playback'));
+      await tester.pump();
+      expect(service.retries, 1);
+      service.updatePlayback(isLoading: false, wantsToPlay: false);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('UP NEXT'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widgetList<AlbumArt>(find.byType(AlbumArt))
+            .map((art) => art.imageUrl),
+        everyElement(url),
+      );
+      Navigator.of(tester.element(find.text('Your queue'))).pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Song options'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widgetList<AlbumArt>(find.byType(AlbumArt))
+            .map((art) => art.imageUrl),
+        everyElement(url),
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets('library plays online catalog, favorites and mixed collections', (
+    tester,
+  ) async {
+    await _viewport(tester, const Size(500, 900));
+    const url = 'https://example.test/library-art.jpg';
+    final online = _onlineTrack(0, imageUrl: url);
+    final local = _track(0).copyWith(albumArtUrl: url);
+    final legacy = _legacyTrack(0)
+        .copyWith(album: online.album, albumArtUrl: url);
+    service.testLocalSongs = [local];
+    service.testSongs = [legacy, online];
+    service.testFavorites = [local, online, legacy];
+    service.testPlaylists = [
+      Playlist(
+        id: 1,
+        name: 'Mixed playlist',
+        songs: [legacy, online, local],
+        gradientId: 0,
+      ),
+    ];
+    final taps = <String>[];
+    await tester.pumpWidget(
+      _app(
+        LibraryScreen(
+          audioService: service,
+          onSongTap: (song) => taps.add(song.identity),
+          onFavoriteTap: (_) {},
+          onCreatePlaylist: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widgetList<SongTile>(find.byType(SongTile))
+          .map((tile) => tile.song.identity),
+      [local.identity, legacy.identity, online.identity],
+    );
+    await tester.tap(find.text(online.title));
+    expect(taps, [online.identity]);
+    await tester.ensureVisible(find.text('Favorites'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Favorites'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('ONLINE (1)'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SongTile), findsOneWidget);
+    expect(find.textContaining('Previous-source favorites'), findsNothing);
+    await tester.tap(find.text(online.title));
+    expect(taps, [online.identity, online.identity]);
+    service.updateFavorites([local]);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('ONLINE ('), findsNothing);
+    expect(find.text(local.title), findsOneWidget);
+    await tester.tap(find.text('Albums'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widgetList<AlbumArt>(find.byType(AlbumArt))
+          .map((art) => art.imageUrl),
+      [null, url],
+    );
+    await tester.tap(find.text(online.album));
+    await tester.tap(find.text('Playlists'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<AlbumArt>(find.byType(AlbumArt)).imageUrl, url);
+    await tester.tap(find.text('Mixed playlist'));
+    expect(taps, List.filled(4, online.identity));
+    expect(find.textContaining('Previous source unavailable.'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('bottom navigation exposes selected labels and all tab actions', (
     tester,
@@ -414,18 +692,18 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('YouTube loading keeps pause intent and gates seeking', (
+  testWidgets('local loading keeps pause intent and gates seeking', (
     tester,
   ) async {
     await _viewport(tester, const Size(400, 1000));
-    service.testQueue = [_youtubeTrack('abcdefghijk')];
+    service.testQueue = [_track(0)];
     service.index = 0;
     service.loading = true;
     service.playIntent = true;
     await tester.pumpWidget(
       _app(NowPlayingScreen(audioService: service, onClose: () {})),
     );
-    expect(find.text('YOUTUBE · AUDIO'), findsOneWidget);
+    expect(find.text('FROM YOUR LIBRARY'), findsOneWidget);
     expect(find.text('Loading audio…'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
@@ -454,14 +732,59 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('same-ID source replacement clears an in-progress seek', (
+    tester,
+  ) async {
+    await _viewport(tester, const Size(400, 1000));
+    final local = _track(0);
+    final legacy = _legacyTrack(local.id);
+    service.testQueue = [local];
+    service.index = 0;
+    await tester.pumpWidget(
+      _app(NowPlayingScreen(audioService: service, onClose: () {})),
+    );
+    await tester.pumpAndSettle();
+    final slider = tester.widget<Slider>(find.byType(Slider));
+    slider.onChangeStart!(60000);
+    slider.onChanged!(60000);
+    await tester.pump();
+    expect(tester.widget<Slider>(find.byType(Slider)).value, 60000);
+
+    // A saved record may share the numeric ID, but it is a different song.
+    service.testQueue = [legacy];
+    service.externalJump(0);
+    service.updatePlayback(
+      isLoading: false,
+      wantsToPlay: false,
+      playbackError: 'Previous source unavailable.',
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<Slider>(find.byType(Slider)).value, 0);
+    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
+    expect(
+      tester.widget<Hero>(find.byType(Hero)).tag,
+      'album-art-${legacy.identity}',
+    );
+    expect(find.text('FROM YOUR LIBRARY'), findsOneWidget);
+    // A late drag callback must not seek the replacement record.
+    slider.onChangeEnd!(60000);
+    await tester.pump();
+    expect(service.seekRequests, isEmpty);
+    expect(service.skipRequests, isEmpty);
+    expect(service.playRequests, isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('full player wraps long errors and retries at 320px', (
     tester,
   ) async {
     await _viewport(tester, const Size(320, 480));
-    service.testQueue = [_youtubeTrack('abcdefghijk', longMetadata: true)];
+    service.testQueue = [_track(0, longMetadata: true)];
     service.index = 0;
     service.error =
-        'Could not load audio. Check your connection and try again. ' * 5;
+        'Could not load audio. Check that the local file is available and try again. ' *
+        5;
     await tester.pumpWidget(
       _app(
         NowPlayingScreen(audioService: service, onClose: () {}),
@@ -493,7 +816,7 @@ void main() {
     var wantsToPlay = true;
     String? error;
     late StateSetter update;
-    final song = _youtubeTrack('abcdefghijk', longMetadata: true);
+    final song = _track(0, longMetadata: true);
     await tester.pumpWidget(
       _app(
         StatefulBuilder(
@@ -542,7 +865,7 @@ void main() {
     update(() {
       loading = false;
       error =
-          'Audio unavailable. Please check your connection and try again. ' * 8;
+          'Audio unavailable. Please check the local file and try again. ' * 8;
     });
     await tester.pumpAndSettle();
     final message = tester.widget<Text>(find.text(error!));
@@ -560,39 +883,33 @@ void main() {
   });
 
   testWidgets(
-    'library keeps colliding source IDs and accepts YouTube favorites and playlists',
+    'library preserves local and legacy identities with native filters and actions',
     (tester) async {
       await _viewport(tester, const Size(500, 900));
       final local = _track(0);
-      final youtube = _youtubeTrack('abcdefghijk');
-      final secondYoutube = _youtubeTrack('lmnopqrstuv');
-      final legacy = _track(0)
-          .copyWith(source: SongSource.legacy, title: 'Old favorite');
+      final secondLocal = _track(1);
+      final legacy = _legacyTrack(0);
       service.testLocalSongs = [local];
       service.testSongs = [
         local.copyWith(title: 'Duplicate local'),
-        youtube,
-        secondYoutube,
+        secondLocal,
         legacy,
       ];
-      service.testFavorites = [youtube, legacy];
+      service.testFavorites = [local, legacy];
       service.testPlaylists = [
-        Playlist(
-          id: 1,
-          name: 'Online playlist',
-          songs: [youtube],
-          gradientId: 0,
-        ),
+        Playlist(id: 1, name: 'Local playlist', songs: [local], gradientId: 0),
+        Playlist(id: 2, name: 'Saved playlist', songs: [legacy], gradientId: 1),
       ];
-      service.testQueue = [youtube];
+      service.testQueue = [local];
       service.index = 0;
       final taps = <String>[];
+      final favorites = <String>[];
       await tester.pumpWidget(
         _app(
           LibraryScreen(
             audioService: service,
             onSongTap: (song) => taps.add(song.identity),
-            onFavoriteTap: (_) {},
+            onFavoriteTap: (song) => favorites.add(song.identity),
             onCreatePlaylist: (_) {},
           ),
         ),
@@ -601,53 +918,151 @@ void main() {
       final tiles = tester.widgetList<SongTile>(find.byType(SongTile)).toList();
       expect(tiles.map((tile) => tile.song.identity), [
         local.identity,
-        youtube.identity,
-        secondYoutube.identity,
+        secondLocal.identity,
         legacy.identity,
       ]);
       expect(
         tiles.where((tile) => tile.isActive).single.song.identity,
-        youtube.identity,
+        local.identity,
       );
       expect(find.text('Duplicate local'), findsNothing);
-      await tester.tap(find.text(secondYoutube.title));
-      await tester.pumpAndSettle();
-      expect(taps, [secondYoutube.identity]);
-      await tester.ensureVisible(find.text('Favorites'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Favorites'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('YOUTUBE (1)'));
-      await tester.pumpAndSettle();
-      expect(
-        find.textContaining('Previous-source favorites are saved'),
-        findsNothing,
-      );
-      await tester.tap(find.text(youtube.title));
-      await tester.pumpAndSettle();
-      expect(taps.last, youtube.identity);
-      await tester.tap(find.text('ALL (2)'));
-      await tester.pumpAndSettle();
+      await tester.tap(find.text(secondLocal.title));
+      await tester.tap(find.byTooltip('Add favorite').first);
       await tester.tap(find.text(legacy.title));
       await tester.pumpAndSettle();
-      expect(taps.length, 2);
+      expect(taps, [secondLocal.identity]);
+      expect(favorites, [local.identity]);
       expect(
         find.textContaining('Previous source unavailable.'),
         findsOneWidget,
       );
+      ScaffoldMessenger.of(tester.element(find.byType(LibraryScreen)))
+          .removeCurrentSnackBar();
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.text('Favorites'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Favorites'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('LOCAL (1)'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SongTile), findsOneWidget);
+      expect(find.text(legacy.title), findsNothing);
+      expect(
+        find.textContaining('Previous-source favorites are saved'),
+        findsNothing,
+      );
+      await tester.tap(find.text(local.title));
+      await tester.pumpAndSettle();
+      expect(taps.last, local.identity);
+      await tester.tap(find.text('Previous source (1)'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SongTile), findsOneWidget);
+      expect(find.text(local.title), findsNothing);
+      expect(
+        find.textContaining('Previous-source favorites are saved'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text(legacy.title));
+      await tester.pumpAndSettle();
+      expect(taps.length, 2);
+      expect(
+        find.text(
+          'Previous source unavailable. "${legacy.title}" by '
+          '${legacy.artist} is saved for reference and cannot be played.',
+        ),
+        findsOneWidget,
+      );
+      ScaffoldMessenger.of(tester.element(find.byType(LibraryScreen)))
+          .removeCurrentSnackBar();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('ALL (2)'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SongTile), findsNWidgets(2));
+
+      await tester.tap(find.text('Albums'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(local.album));
+      await tester.tap(find.text(legacy.album));
+      await tester.pumpAndSettle();
+      expect(taps, [secondLocal.identity, local.identity, local.identity]);
+      expect(
+        find.textContaining('Previous source unavailable.'),
+        findsOneWidget,
+      );
+      ScaffoldMessenger.of(tester.element(find.byType(LibraryScreen)))
+          .removeCurrentSnackBar();
+      await tester.pumpAndSettle();
+
       await tester.tap(find.text('Playlists'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Online playlist'));
+      await tester.tap(find.text('Local playlist'));
+      await tester.tap(find.text('Saved playlist'));
       await tester.pumpAndSettle();
       expect(taps, [
-        secondYoutube.identity,
-        youtube.identity,
-        youtube.identity,
+        secondLocal.identity,
+        local.identity,
+        local.identity,
+        local.identity,
       ]);
+      expect(
+        find.textContaining('Previous source unavailable.'),
+        findsOneWidget,
+      );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
+
+  testWidgets('previous-source filter only exists for saved favorites', (
+    tester,
+  ) async {
+    await _viewport(tester, const Size(500, 900));
+    final local = _track(0);
+    final legacy = _legacyTrack(0);
+    await tester.pumpWidget(
+      _app(
+        LibraryScreen(
+          audioService: service,
+          onSongTap: (_) {},
+          onFavoriteTap: (_) {},
+          onCreatePlaylist: (_) {},
+        ),
+      ),
+    );
+    await tester.ensureVisible(find.text('Favorites'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Favorites'));
+    await tester.pumpAndSettle();
+    expect(find.text('No favorites yet'), findsOneWidget);
+    expect(find.textContaining('Previous source ('), findsNothing);
+
+    service.updateFavorites([local]);
+    await tester.pumpAndSettle();
+    expect(find.text('LOCAL (1)'), findsOneWidget);
+    expect(find.textContaining('Previous source ('), findsNothing);
+
+    service.updateFavorites([legacy]);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('LOCAL (0)'));
+    await tester.pumpAndSettle();
+    expect(find.text('No local favorite songs'), findsOneWidget);
+    await tester.tap(find.text('Previous source (1)'));
+    await tester.pumpAndSettle();
+    expect(find.text(legacy.title), findsOneWidget);
+
+    service.updateFavorites([local]);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Previous source ('), findsNothing);
+    expect(find.textContaining('Previous-source favorites'), findsNothing);
+    expect(find.text(local.title), findsOneWidget);
+    expect(find.byType(SongTile), findsOneWidget);
+    service.updateFavorites([]);
+    await tester.pumpAndSettle();
+    expect(find.text('No favorites yet'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets(
     'local highlights source-aware identity and retains local actions',
@@ -655,7 +1070,7 @@ void main() {
       await _viewport(tester, const Size(400, 800));
       final local = _track(0);
       service.testLocalSongs = [local];
-      service.testQueue = [_youtubeTrack('abcdefghijk'), local];
+      service.testQueue = [_legacyTrack(local.id), local];
       service.index = 0;
       var plays = 0;
       var favorites = 0;
